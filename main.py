@@ -1,7 +1,7 @@
 """Terminal Weather Agent — Week 1 lab."""
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 
 from agent import build_graph
 
@@ -11,28 +11,22 @@ SYSTEM_PROMPT = (
     "answer on the tool's observation rather than guessing."
 )
 
+# The interactive loop lives inside the graph itself (input -> ... -> input,
+# with classify -> END as the only exit), so a single invoke() runs the whole
+# session. LangGraph's default recursion_limit (25 node hops) is meant for
+# bounded agent loops, not an open-ended terminal session, so raise it here.
+RECURSION_LIMIT = 10_000
+
 
 def main():
     load_dotenv()
     graph = build_graph()
 
-    print("Weather Agent — type a city name (or 'quit' to exit)")
-    while True:
-        city = input("\nCity> ").strip()
-        if city.lower() in {"quit", "exit"}:
-            break
-        if not city:
-            continue
-
-        result = graph.invoke(
-            {
-                "messages": [
-                    SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(content=f"What's the weather in {city}?"),
-                ]
-            }
-        )
-        print(result["messages"][-1].content)
+    print("Weather Agent — ask about the weather, or say you want to quit.")
+    graph.invoke(
+        {"messages": [SystemMessage(content=SYSTEM_PROMPT)]},
+        config={"recursion_limit": RECURSION_LIMIT},
+    )
 
 
 if __name__ == "__main__":
