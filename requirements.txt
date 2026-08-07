@@ -3,3 +3,6 @@ langchain
 langchain-anthropic
 requests
 python-dotenv
+playwright
+python-jobspy
+langsmith

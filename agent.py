@@ -1,5 +1,7 @@
 """
-Week 1 lab: a terminal Weather Agent built as an explicit ReAct loop in LangGraph.
+Terminal agent built as an explicit ReAct loop in LangGraph. Started as the
+Week 1 lab (weather only, see the `week1-lab` git branch for that snapshot)
+and grew a browser (Playwright) and a job search (JobSpy) in Week 2.
 
 Graph shape:
 
@@ -10,10 +12,15 @@ Graph shape:
 - `input` reads one line from the terminal and adds it to the conversation.
 - `classify` is the dispatch step: instead of hardcoded string checks like
   `if city.lower() in {"quit", "exit"}`, an LLM call reads the message and
-  decides WEATHER / QUIT / OTHER. The whole interactive session lives inside
-  a single `graph.invoke()` — the `respond -> input` and `classify -> input`
+  decides ACT / QUIT / OTHER. The whole interactive session lives inside a
+  single `graph.invoke()` — the `respond -> input` and `classify -> input`
   edges are what replace Python's `while True`, and `classify -> END` is the
-  only way out.
+  only way out. ACT is intentionally domain-agnostic (not e.g. WEATHER):
+  with three unrelated tools now bound to the LLM, routing on a fixed set of
+  domain names would mean updating the router every time a tool is added.
+  The router only decides whether the message needs one of `reasoning`'s
+  tools at all; which tool is the reasoning step's job, same as any
+  function-calling LLM call.
 - `reasoning` is the "Reason" step: the LLM decides whether it has enough
   information to answer, or needs to call a tool.
 - `action` is the "Act" step: it executes the tool call the LLM requested.
@@ -22,6 +29,11 @@ Graph shape:
   is appended to the message list as a ToolMessage, and the LLM is required
   to look at it before it's allowed to produce a final answer. Without this,
   the agent could "act" blindly and never actually use what it found.
+
+LangSmith tracing is picked up automatically from the LANGCHAIN_TRACING_V2 /
+LANGCHAIN_API_KEY / LANGCHAIN_PROJECT env vars (see .env.example) — no code
+here talks to LangSmith directly, LangGraph/LangChain report every node run
+to it when those vars are set.
 """
 
 from typing import Annotated, Literal, TypedDict
@@ -34,19 +46,22 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from tools import get_weather
+from jobs_tool import search_jobs
+from browser_tools import browse_page
 
 load_dotenv()
 
-TOOLS = [get_weather]
+TOOLS = [get_weather, search_jobs, browse_page]
 
 llm = ChatAnthropic(model="claude-sonnet-5").bind_tools(TOOLS)
 router_llm = ChatAnthropic(model="claude-sonnet-5")
 
 ROUTER_PROMPT = (
     "Classify the user's message as exactly one word:\n"
-    "WEATHER - they are asking about weather, temperature, or forecast for a place\n"
+    "ACT - they want you to do something: check weather, search for jobs, "
+    "browse/inspect a web page, or anything else you have a tool for\n"
     "QUIT - they want to exit, stop, or end the session\n"
-    "OTHER - anything else\n"
+    "OTHER - anything else (small talk, unrelated questions)\n"
     "Reply with only that one word, nothing else."
 )
 
@@ -65,11 +80,11 @@ def classify_node(state: AgentState) -> AgentState:
     last_message = state["messages"][-1]
     response = router_llm.invoke([SystemMessage(content=ROUTER_PROMPT), last_message])
     intent = response.content.strip().upper()
-    return {"intent": intent if intent in {"WEATHER", "QUIT", "OTHER"} else "OTHER"}
+    return {"intent": intent if intent in {"ACT", "QUIT", "OTHER"} else "OTHER"}
 
 
 def route_after_classify(state: AgentState) -> Literal["reasoning", "input", "__end__"]:
-    return {"WEATHER": "reasoning", "QUIT": END, "OTHER": "input"}[state["intent"]]
+    return {"ACT": "reasoning", "QUIT": END, "OTHER": "input"}[state["intent"]]
 
 
 def reasoning_node(state: AgentState) -> AgentState:
