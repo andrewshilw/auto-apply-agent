@@ -20,14 +20,22 @@ browser window, rather than trying to script Google's OAuth flow or get past
 a bot check. Either way, login only has to happen once: it runs inside a
 named, `--restore`-d agent-browser session, so cookies persist across runs in
 `~/.agent-browser/sessions/` and later runs skip straight to being logged in.
+
+Visual focus: before every fill/click, `_focus()` calls agent-browser's
+`highlight` command, which draws a red box around the target element on the
+live page — visible directly in the headed window while it runs, not just
+after the fact — then saves a numbered screenshot of that moment to
+`screenshots/` so the sequence can be replayed afterward too.
 """
 
+import itertools
 import os
 import re
 import shutil
 import subprocess
 import time
 import urllib.parse
+from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -36,12 +44,16 @@ SESSION_NAME = "linkedin-lab"
 LOGIN_URL = "https://www.linkedin.com/login"
 FEED_URL = "https://www.linkedin.com/feed/"
 JOBS_URL = "https://www.linkedin.com/jobs/search/"
+SCREENSHOT_DIR = Path(__file__).parent / "screenshots"
+FOCUS_PAUSE_SECONDS = 0.6
 
 ROLE_NAME_RE = re.compile(r'-\s*(?P<role>[A-Za-z]+)\s+"(?P<name>[^"]*)"')
 REF_RE = re.compile(r"ref=(e\d+)")
 URL_RE = re.compile(r"url=([^\],]+)")
 DISMISS_RE = re.compile(r"Dismiss (.+?) job\b")
 JOB_ID_RE = re.compile(r"currentJobId=(\d+)")
+
+_screenshot_counter = itertools.count(1)
 
 
 def _run(*args: str, timeout: int = 45) -> str:
@@ -104,6 +116,17 @@ def _is_logged_in() -> bool:
     return "/feed" in _current_url()
 
 
+def _focus(ref: str, label: str) -> None:
+    """Highlight the element the agent is about to act on (visible live in
+    the headed window) and save a numbered screenshot of that moment."""
+    _run("highlight", ref)
+    time.sleep(FOCUS_PAUSE_SECONDS)
+    SCREENSHOT_DIR.mkdir(exist_ok=True)
+    safe_label = re.sub(r"[^\w-]+", "_", label).strip("_")[:60]
+    shot_path = SCREENSHOT_DIR / f"{next(_screenshot_counter):03d}_{safe_label}.png"
+    _run("screenshot", str(shot_path))
+
+
 def _try_password_login(email: str, password: str) -> bool:
     """Fill and submit the classic email/password form if it's present.
     Returns False (without raising) if those fields aren't on the page, e.g.
@@ -117,8 +140,11 @@ def _try_password_login(email: str, password: str) -> bool:
     password_ref = _find_ref(elements, "textbox", "password")
     signin_ref = _find_ref(elements, "button", "sign in")
 
+    _focus(email_ref, "email")
     _run("fill", email_ref, email)
+    _focus(password_ref, "password")
     _run("fill", password_ref, password)
+    _focus(signin_ref, "sign-in")
     _run("click", signin_ref)
     time.sleep(3)
     return True
@@ -186,6 +212,7 @@ def _search_jobs(search_term: str, results_wanted: int) -> list[tuple[str, str]]
     for card in cards:
         if len(jobs) >= results_wanted:
             break
+        _focus(card["ref"], card["title"])
         _run("click", card["ref"])
         time.sleep(1)
         current_url = _run("eval", "location.href")

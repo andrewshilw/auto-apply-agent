@@ -29,7 +29,11 @@ module docstring in `agent.py` for the full graph shape.
   checkpoint), it pauses and asks you to finish logging in by hand in the
   visible window — either way this only has to happen once, since the
   session is saved (via agent-browser's `--session --restore`) and reused
-  on later runs.
+  on later runs. Before every fill/click, it highlights the target element
+  live in the browser window (agent-browser's `highlight` command draws a
+  red box around it) so you can watch its "visual focus" move across the
+  page in real time, and saves a numbered screenshot of each moment to
+  `screenshots/` (gitignored) so the sequence can be replayed afterward.
 
 ## Setup
 
