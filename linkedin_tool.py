@@ -218,6 +218,6 @@ def linkedin_job_search(search_term: str, results_wanted: int = 5) -> str:
     each result. First run may pause in the terminal asking you to log in by
     hand in the browser window (e.g. Google sign-in); later runs reuse that
     session. This drives an actual LinkedIn login and logged-in session,
-    which LinkedIn's User Agreement prohibits automating — prefer
-    search_jobs (JobSpy, no login) unless you specifically need this."""
+    which LinkedIn's User Agreement prohibits automating — use only with an
+    account you're willing to risk getting banned."""
     return search_linkedin_jobs(search_term, results_wanted)
