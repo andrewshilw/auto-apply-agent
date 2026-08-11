@@ -16,27 +16,27 @@ module docstring in `agent.py` for the full graph shape.
 
 - `get_weather` (`tools.py`) — current weather for a city, via the free
   Open-Meteo geocoding + forecast APIs.
-- `search_jobs` (`jobs_tool.py`) — searches LinkedIn + Indeed's public job
-  search via [JobSpy](https://github.com/speedyapply/JobSpy); no login
-  required.
-- `browse_page` (`browser_tools.py`) — opens a URL with Playwright, returns
-  a simplified accessibility-tree snapshot (`Locator.aria_snapshot()`)
-  instead of raw HTML, and saves a screenshot to `screenshots/` (gitignored)
-  for visual debugging. Expect some sites to return a Cloudflare/bot-block
-  page instead of their real content — that's the intended behavior to
-  observe, not a bug to route around; the agent reports what it saw rather
-  than trying to defeat the block.
+- `linkedin_job_search` (`linkedin_tool.py`) — logs into LinkedIn with a
+  real, **visible** browser window (via the [agent-browser](https://agent-browser.dev)
+  CLI, not a headless/terminal scrape) and searches LinkedIn's job board
+  directly. This is the Week 2 lab: an agent that actually opens LinkedIn,
+  logs in, and searches, rather than hitting a job-search API from the
+  terminal. LinkedIn's User Agreement prohibits automated login/scraping
+  and this can get an account banned — only use it with an account you're
+  willing to risk. If your account logs in with a password, set
+  `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` in `.env` and the tool fills the
+  form itself; for anything else (Google sign-in, 2FA, a security
+  checkpoint), it pauses and asks you to finish logging in by hand in the
+  visible window — either way this only has to happen once, since the
+  session is saved (via agent-browser's `--session --restore`) and reused
+  on later runs.
 
 ## Setup
-
-Needs Python 3.10+ (`python-jobspy` requires it) — use `python3.12` or
-newer, not an older system `python3`.
 
 ```bash
 python3.12 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python -m playwright install chromium
 cp .env.example .env   # then fill in ANTHROPIC_API_KEY
 ```
 
@@ -45,6 +45,15 @@ and `LANGCHAIN_PROJECT` in `.env`. LangGraph reports every node run to
 LangSmith automatically when those are set — no code here talks to
 LangSmith directly.
 
+`linkedin_job_search` / `run_linkedin_lab.py` need the agent-browser CLI
+(Node/npm, separate from the Python venv above), and `LINKEDIN_EMAIL` /
+`LINKEDIN_PASSWORD` in `.env` if your account uses password login:
+
+```bash
+npm install -g agent-browser
+agent-browser install   # downloads a Chrome build agent-browser drives
+```
+
 ## Run
 
 ```bash
@@ -52,10 +61,19 @@ source venv/bin/activate
 python main.py
 ```
 
+Or run the LinkedIn lab directly (opens a real, visible browser window):
+
+```bash
+source venv/bin/activate
+python run_linkedin_lab.py
+```
+
 ## Files
 
-- `tools.py`, `jobs_tool.py`, `browser_tools.py` — the three tools, see
-  above.
+- `tools.py`, `linkedin_tool.py` — the two tools, see above.
+- `run_linkedin_lab.py` — standalone script for the Week 2 lab: log into
+  LinkedIn, search "Java Engineer", print the top 5 titles + links. Run it
+  directly rather than through `main.py`'s chat loop.
 - `agent.py` — the LangGraph graph:
   - `input` reads one line from the terminal.
   - `classify` asks an LLM to route the message as `ACT` / `QUIT` / `OTHER`.

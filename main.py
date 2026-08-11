@@ -1,4 +1,4 @@
-"""Terminal agent — weather, job search, and browser tools."""
+"""Terminal agent — weather and LinkedIn job search tools."""
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage
@@ -6,12 +6,11 @@ from langchain_core.messages import SystemMessage
 from agent import build_graph
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant with three tools: get_weather (current "
-    "weather for a city), search_jobs (searches LinkedIn + Indeed's public "
-    "job search, no login needed), and browse_page (opens a URL in a real "
-    "browser and returns its accessibility tree plus a screenshot). Use "
-    "whichever tool fits the user's request and always base your answer on "
-    "the tool's observation rather than guessing."
+    "You are a helpful assistant with two tools: get_weather (current "
+    "weather for a city) and linkedin_job_search (logs into LinkedIn with a "
+    "real, visible browser and searches its job board directly, returning "
+    "titles and links). Use whichever tool fits the user's request and "
+    "always base your answer on the tool's observation rather than guessing."
 )
 
 # The interactive loop lives inside the graph itself (input -> ... -> input,

@@ -1,7 +1,7 @@
 """
 Terminal agent built as an explicit ReAct loop in LangGraph. Started as the
 Week 1 lab (weather only, see the `week1-lab` git branch for that snapshot)
-and grew a browser (Playwright) and a job search (JobSpy) in Week 2.
+and grew a real, visible browser (agent-browser) for LinkedIn in Week 2.
 
 Graph shape:
 
@@ -16,10 +16,10 @@ Graph shape:
   single `graph.invoke()` — the `respond -> input` and `classify -> input`
   edges are what replace Python's `while True`, and `classify -> END` is the
   only way out. ACT is intentionally domain-agnostic (not e.g. WEATHER):
-  with three unrelated tools now bound to the LLM, routing on a fixed set of
-  domain names would mean updating the router every time a tool is added.
-  The router only decides whether the message needs one of `reasoning`'s
-  tools at all; which tool is the reasoning step's job, same as any
+  with unrelated tools bound to the LLM, routing on a fixed set of domain
+  names would mean updating the router every time a tool is added. The
+  router only decides whether the message needs one of `reasoning`'s tools
+  at all; which tool is the reasoning step's job, same as any
   function-calling LLM call.
 - `reasoning` is the "Reason" step: the LLM decides whether it has enough
   information to answer, or needs to call a tool.
@@ -46,20 +46,19 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from tools import get_weather
-from jobs_tool import search_jobs
-from browser_tools import browse_page
+from linkedin_tool import linkedin_job_search
 
 load_dotenv()
 
-TOOLS = [get_weather, search_jobs, browse_page]
+TOOLS = [get_weather, linkedin_job_search]
 
 llm = ChatAnthropic(model="claude-sonnet-5").bind_tools(TOOLS)
 router_llm = ChatAnthropic(model="claude-sonnet-5")
 
 ROUTER_PROMPT = (
     "Classify the user's message as exactly one word:\n"
-    "ACT - they want you to do something: check weather, search for jobs, "
-    "browse/inspect a web page, or anything else you have a tool for\n"
+    "ACT - they want you to do something: check weather, search for "
+    "LinkedIn jobs, or anything else you have a tool for\n"
     "QUIT - they want to exit, stop, or end the session\n"
     "OTHER - anything else (small talk, unrelated questions)\n"
     "Reply with only that one word, nothing else."
