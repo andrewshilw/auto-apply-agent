@@ -3,3 +3,14 @@ __pycache__/
 *.pyc
 .env
 screenshots/*.png
+
+# Week 3: resume/vector-store data. resume_data/ and chroma_db/ are derived
+# from whatever PDF is parsed and regenerate on demand (see resume.py /
+# vector_store.py), so they aren't committed. *.pdf is ignored everywhere
+# except sample_data/, so a real resume dropped in for local testing never
+# gets committed by accident.
+resume_data/
+chroma_db/
+logs/
+*.pdf
+!sample_data/*.pdf

@@ -50,7 +50,7 @@ FOCUS_PAUSE_SECONDS = 0.6
 ROLE_NAME_RE = re.compile(r'-\s*(?P<role>[A-Za-z]+)\s+"(?P<name>[^"]*)"')
 REF_RE = re.compile(r"ref=(e\d+)")
 URL_RE = re.compile(r"url=([^\],]+)")
-DISMISS_RE = re.compile(r"Dismiss (.+?) job\b")
+JOB_VIEW_URL_RE = re.compile(r"/jobs/view/(\d+)")
 JOB_ID_RE = re.compile(r"currentJobId=(\d+)")
 
 _screenshot_counter = itertools.count(1)
@@ -181,21 +181,21 @@ def _ensure_logged_in() -> None:
 
 
 def _extract_job_cards(elements: list[dict]) -> list[dict]:
-    """Each result is a card rendered as a button whose accessible name is
-    the whole card's text, including a "Dismiss <title> job" fragment from a
-    nested (do-not-click) dismiss button. Skip the nested button itself
-    (name is *exactly* "Dismiss <title> job") and keep only the outer card
-    button, using the same fragment to pull out a clean title."""
+    """Each search result is a `link` whose accessible name is the job
+    title (LinkedIn duplicates each card as two links to the same job —
+    e.g. one titled "X with verification" and a second plain "X" — so
+    dedupe by the job id embedded in the link's own URL rather than by
+    name)."""
     cards = []
+    seen_ids = set()
     for el in elements:
-        if el["role"] != "button":
+        if el["role"] != "link" or not el["url"]:
             continue
-        match = DISMISS_RE.search(el["name"])
-        if not match:
+        match = JOB_VIEW_URL_RE.search(el["url"])
+        if not match or match.group(1) in seen_ids:
             continue
-        title = match.group(1).strip()
-        if el["name"].strip() == f"Dismiss {title} job":
-            continue
+        seen_ids.add(match.group(1))
+        title = el["name"].removesuffix(" with verification").strip()
         cards.append({"ref": el["ref"], "title": title})
     return cards
 
@@ -206,7 +206,7 @@ def _search_jobs(search_term: str, results_wanted: int) -> list[tuple[str, str]]
     _run("wait", "--load", "domcontentloaded")
     time.sleep(2)
 
-    cards = _extract_job_cards(_snapshot())
+    cards = _extract_job_cards(_snapshot(urls=True))
     jobs = []
     seen_ids = set()
     for card in cards:
@@ -236,6 +236,20 @@ def search_linkedin_jobs(search_term: str, results_wanted: int = 5) -> str:
         return f"No results found for '{search_term}' on LinkedIn (or the page layout changed)."
 
     return "\n".join(f"{i}. {title} — {url}" for i, (title, url) in enumerate(jobs, start=1))
+
+
+def get_job_description_text(job_url: str | None = None, max_chars: int = 6000) -> str:
+    """Open a job's detail page (if `job_url` is given) and return its
+    rendered text via agent-browser's `read`, which extracts readable page
+    content instead of relying on LinkedIn's CSS classes (fragile, changes
+    often). Omit `job_url` to read whatever page is already open in the
+    session — e.g. right after `search_linkedin_jobs` leaves a job's detail
+    page open."""
+    if job_url:
+        _open(job_url)
+        _run("wait", "--load", "domcontentloaded")
+        time.sleep(1)
+    return _run("read", "--max-output", str(max_chars)).strip()
 
 
 @tool

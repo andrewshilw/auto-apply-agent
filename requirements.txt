@@ -4,3 +4,6 @@ langchain-anthropic
 requests
 python-dotenv
 langsmith
+pypdf
+chromadb
+reportlab
