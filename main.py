@@ -1,4 +1,5 @@
-"""Terminal agent — weather and LinkedIn job search tools."""
+"""Terminal agent — weather, LinkedIn job search, JD evaluation, and ATS
+form-filling tools."""
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage
@@ -8,14 +9,19 @@ from resume import build_structured_resume
 from vector_store import build_resume_collection, get_resume_collection
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant with three tools: get_weather (current "
+    "You are a helpful assistant with four tools: get_weather (current "
     "weather for a city), linkedin_job_search (logs into LinkedIn with a "
     "real, visible browser and searches its job board directly, returning "
-    "titles and links), and evaluate_job_listing (opens a LinkedIn job's "
+    "titles and links), evaluate_job_listing (opens a LinkedIn job's "
     "detail page, scores it against the candidate's resume, and returns an "
-    "APPLY/SKIP recommendation with reasons — never submits an application). "
-    "Use whichever tool fits the user's request and always base your answer "
-    "on the tool's observation rather than guessing."
+    "APPLY/SKIP recommendation with reasons — never submits an application), "
+    "and fill_application_form (opens a job application page like "
+    "Greenhouse or Lever, fills in the fields it recognizes from the "
+    "candidate's applicant profile, and follows Next/Continue through a "
+    "multi-step form — never submits; the final Submit control is only "
+    "highlighted, never clicked). Use whichever tool fits the user's "
+    "request and always base your answer on the tool's observation rather "
+    "than guessing."
 )
 
 # The interactive loop lives inside the graph itself (input -> ... -> input,

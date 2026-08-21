@@ -1,8 +1,9 @@
 """
 Terminal agent built as an explicit ReAct loop in LangGraph. Started as the
 Week 1 lab (weather only, see the `week1-lab` git branch for that snapshot),
-grew a real, visible browser (agent-browser) for LinkedIn in Week 2, and
-gained a dedicated JD Evaluation Node in Week 3.
+grew a real, visible browser (agent-browser) for LinkedIn in Week 2, gained a
+dedicated JD Evaluation Node in Week 3, and gained automated ATS form filling
+in Week 4.
 
 Graph shape:
 
@@ -28,10 +29,15 @@ Graph shape:
 - `reasoning` is the "Reason" step: the LLM decides whether it has enough
   information to answer, or needs to call a tool.
 - `action` is the generic "Act" step for domain-agnostic tools (weather,
-  LinkedIn search): it executes whatever tool call the LLM requested and
-  always routes back to `reasoning`, never onward. That's what forces an
-  Observation after every Action — the tool's result is appended as a
-  ToolMessage, and the LLM must look at it before it's allowed to answer.
+  LinkedIn search, form filling): it executes whatever tool call the LLM
+  requested and always routes back to `reasoning`, never onward. That's what
+  forces an Observation after every Action — the tool's result is appended
+  as a ToolMessage, and the LLM must look at it before it's allowed to
+  answer. `fill_application_form` (Week 4, `form_fill.py`) runs its own
+  self-contained LangGraph cycle inside that single tool call — see
+  `form_fill.py`'s module docstring — rather than needing dedicated nodes
+  here, since unlike `evaluate_job_listing` its outcome doesn't need to
+  steer *this* graph, only its own internal identify/fill/click_next loop.
 - `evaluate` is the Week 3 JD Evaluation Node — unlike `action`, this one
   isn't domain-agnostic on purpose: the whole point is that its outcome
   (APPLY vs SKIP, from `evaluation.decide`'s > 80 threshold) has to steer
@@ -65,6 +71,7 @@ from langgraph.prebuilt import ToolNode
 from tools import get_weather
 from linkedin_tool import linkedin_job_search
 from evaluation import Decision, evaluate_job_listing, run_job_evaluation
+from form_fill import fill_application_form
 
 load_dotenv()
 
@@ -72,7 +79,7 @@ load_dotenv()
 # can choose to call it), but its execution is routed to the dedicated
 # `evaluate` node below rather than the generic `action` ToolNode — see the
 # module docstring for why.
-ACTION_TOOLS = [get_weather, linkedin_job_search]
+ACTION_TOOLS = [get_weather, linkedin_job_search, fill_application_form]
 EVALUATE_TOOL_NAME = evaluate_job_listing.name
 TOOLS = [*ACTION_TOOLS, evaluate_job_listing]
 
@@ -82,8 +89,8 @@ router_llm = ChatAnthropic(model="claude-sonnet-5")
 ROUTER_PROMPT = (
     "Classify the user's message as exactly one word:\n"
     "ACT - they want you to do something: check weather, search for "
-    "LinkedIn jobs, evaluate a job listing against their resume, or "
-    "anything else you have a tool for\n"
+    "LinkedIn jobs, evaluate a job listing against their resume, fill out "
+    "a job application form, or anything else you have a tool for\n"
     "QUIT - they want to exit, stop, or end the session\n"
     "OTHER - anything else (small talk, unrelated questions)\n"
     "Reply with only that one word, nothing else."

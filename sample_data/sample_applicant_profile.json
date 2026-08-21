@@ -1,0 +1,14 @@
+{
+  "first_name": "Jordan",
+  "last_name": "Rivera",
+  "email": "jordan.rivera.dev@example.com",
+  "phone_number": "555-201-4488",
+  "location": "Austin, TX",
+  "linkedin_url": "https://www.linkedin.com/in/jordanrivera-dev",
+  "github_url": "https://github.com/jordanrivera-dev",
+  "portfolio_url": "https://jordanrivera.dev",
+  "current_company": "Northlake Data Co.",
+  "current_title": "Software Engineering Intern",
+  "work_authorized": "Yes",
+  "requires_sponsorship": "No"
+}

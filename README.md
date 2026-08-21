@@ -52,6 +52,45 @@ module docstring in `agent.py` for the full graph shape.
   edge to an `apply_action` or `fallback` node — the ">80 triggers Apply,
   otherwise auto-fallback" logic), not just come back as text for the LLM
   to interpret. See the graph shape in `agent.py`'s module docstring.
+- `fill_application_form` (`form_fill.py`) — the Week 4 lab: automated ATS
+  form filling. Opens a job application page (Greenhouse, Lever, or
+  similar) in the same real, visible agent-browser window and runs its own
+  self-contained LangGraph cycle — `identify` (snapshot the page's fields)
+  `-> fill -> click_next -> identify` — until either a "Submit" control is
+  found or there's no "Next"/"Continue" left. If the page has no fillable
+  fields yet (Lever puts the job description and the actual form behind a
+  separate "Apply for this job" link), `click_next` clicks that entry link
+  for real too — it's pure navigation, and gated on zero fields being
+  present so it can never be confused with the final Submit. **Semantic
+  mapping** (`map_field_to_key`) matches each field's accessible-name label
+  against keyword patterns (e.g. "Phone Number *" -> `phone_number`) to
+  decide which key of the candidate's `ApplicantProfile` fills it; anything
+  with no confident match (free-text essay questions, file uploads, a
+  combined "Full name" field) is left alone and reported as skipped rather
+  than guessed at. Every fill is verified, not just fired-and-forgotten:
+  `_fill_and_verify` reads the value back *after forcing a blur*, because
+  testing against a real Greenhouse posting turned up autocomplete-style
+  fields (e.g. a Google-Places-style "Location" box) that accept a typed
+  value right up until focus moves away, then silently clear themselves
+  since no dropdown suggestion was ever selected — checking immediately
+  after `fill` alone missed that and would have falsely reported success.
+  Clicking "Next" is a real click (it's just page navigation), but the
+  final Submit control is only **shadow-clicked** — highlighted and
+  screenshotted to prove the targeting was accurate, never actually
+  clicked — same "recommend, don't act" policy as `evaluate_job_listing`'s
+  APPLY decision. Unlike `evaluate_job_listing`, its outcome doesn't need
+  to steer the *main* agent graph (only its own internal loop), so it's
+  bound as an ordinary domain-agnostic tool in `agent.py`, same as
+  `linkedin_job_search`.
+- `browser.py` — the agent-browser primitives (`run`/`snapshot`/`focus`/
+  etc.) shared by `linkedin_tool.py` and `form_fill.py`, parameterized by
+  an explicit session name per tool (LinkedIn needs a persistent logged-in
+  session; ATS forms generally don't).
+- `run_form_fill_lab.py` — standalone script for the Week 4 lab: fill out a
+  real Greenhouse/Lever application form end-to-end (`python
+  run_form_fill_lab.py <job_application_url>`) using the synthetic
+  `sample_data/sample_applicant_profile.json`, and print a summary of what
+  was filled, skipped, and shadow-clicked. Never submits.
 
 ### Resume structuring + vector store
 
@@ -124,21 +163,37 @@ source venv/bin/activate
 python run_evaluation_lab.py
 ```
 
+Or run the Week 4 form-filling lab against a real Greenhouse/Lever
+application page (never submits):
+
+```bash
+source venv/bin/activate
+python run_form_fill_lab.py <job_application_url>
+```
+
 ## Files
 
-- `tools.py`, `linkedin_tool.py`, `evaluation.py` — the three tools, see
-  above.
+- `tools.py`, `linkedin_tool.py`, `evaluation.py`, `form_fill.py` — the four
+  tools, see above.
+- `browser.py` — agent-browser primitives shared by `linkedin_tool.py` and
+  `form_fill.py`, see above.
 - `resume.py`, `vector_store.py` — resume PDF parsing/structuring and the
   ChromaDB resume vector store, see "Resume structuring + vector store"
   above.
 - `scripts/generate_sample_resume.py` — generates the synthetic
   `sample_data/sample_resume.pdf` used by default.
+- `sample_data/sample_applicant_profile.json` — synthetic applicant contact
+  info (name, email, phone, links, etc.) `form_fill.py` fills ATS forms
+  with by default.
 - `run_linkedin_lab.py` — standalone script for the Week 2 lab: log into
   LinkedIn, search "Java Engineer", print the top 5 titles + links. Run it
   directly rather than through `main.py`'s chat loop.
 - `run_evaluation_lab.py` — standalone script for the Week 3 lab: search
   LinkedIn, then score every candidate job against the resume vector store
   and print an APPLY/SKIP decision with reasons for each.
+- `run_form_fill_lab.py` — standalone script for the Week 4 lab: fill out a
+  real Greenhouse/Lever application form end-to-end and print what was
+  filled, skipped, and shadow-clicked. Never submits.
 - `agent.py` — the LangGraph graph:
   - `input` reads one line from the terminal.
   - `classify` asks an LLM to route the message as `ACT` / `QUIT` / `OTHER`.
@@ -148,10 +203,14 @@ python run_evaluation_lab.py
     the router's, so adding a tool never means updating the router.
   - `reasoning` (LLM decides whether to call a tool) routes to one of two
     "Act" steps depending on which tool was called: `action` for
-    domain-agnostic tools (`get_weather`, `linkedin_job_search`), or
-    `evaluate` specifically for `evaluate_job_listing`.
+    domain-agnostic tools (`get_weather`, `linkedin_job_search`,
+    `fill_application_form`), or `evaluate` specifically for
+    `evaluate_job_listing`.
   - `action` executes the tool call generically and always routes back to
     `reasoning` — that's what forces an Observation after every Action.
+    `fill_application_form` runs its own self-contained LangGraph cycle
+    inside that single tool call (see `form_fill.py`), since unlike
+    `evaluate_job_listing` its outcome doesn't need to steer this graph.
   - `evaluate` (the Week 3 JD Evaluation Node) runs the JD-vs-resume
     scoring pipeline, then a real conditional edge — not just prompt text —
     routes to `apply_action` (score `> 80`) or `fallback` (otherwise) based
