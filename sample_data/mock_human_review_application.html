@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock ATS Application — Week 5 Human-in-the-Loop Lab</title>
+</head>
+<body>
+<h1>Apply: Backend Engineer</h1>
+<form>
+  <label for="first_name">First Name</label>
+  <input type="text" id="first_name" name="first_name">
+
+  <label for="last_name">Last Name</label>
+  <input type="text" id="last_name" name="last_name">
+
+  <label for="email">Email</label>
+  <input type="email" id="email" name="email">
+
+  <!-- Free-text custom question with no profile equivalent — the field
+       identification step (map_fields_to_profile) leaves this unmapped and
+       flags custom_question=true, so human_review_node raises an
+       interrupt() and asks a person to answer it, instead of an ordinary
+       skip. -->
+  <label for="why_java">Why do you love Java? *</label>
+  <textarea id="why_java" name="why_java" rows="4"></textarea>
+
+  <!-- Mock CAPTCHA widget: a plain checkbox is enough to exercise
+       _detect_captcha's name-based heuristic without depending on a real
+       reCAPTCHA/hCaptcha embed, which agent-browser can't drive anyway
+       (cross-origin iframe). -->
+  <div style="border:1px solid #767676;padding:8px;width:260px;">
+    <label>
+      <input type="checkbox" id="captcha_checkbox" aria-label="I'm not a robot">
+      I'm not a robot
+    </label>
+  </div>
+
+  <button type="button">Submit Application</button>
+</form>
+</body>
+</html>

@@ -56,13 +56,18 @@ module docstring in `agent.py` for the full graph shape.
   form filling. Opens a job application page (Greenhouse, Lever, or
   similar) in the same real, visible agent-browser window and runs its own
   self-contained LangGraph cycle — `identify` (snapshot the page's fields)
-  `-> fill -> fill_dropdowns -> click_next -> identify` — until either a
-  "Submit" control is found or there's no "Next"/"Continue" left. If the
-  page has no fillable fields yet (Lever puts the job description and the
-  actual form behind a separate "Apply for this job" link), `click_next`
-  clicks that entry link for real too — it's pure navigation, and gated on
-  zero fields being present so it can never be confused with the final
-  Submit. **Field identification is AI-driven, not a keyword table**:
+  `-> fill -> fill_dropdowns -> human_review -> click_next -> identify` —
+  until either a "Submit" control is found or there's no "Next"/"Continue"
+  left. If the page has no fillable fields yet (Lever puts the job
+  description and the actual form behind a separate "Apply for this job"
+  link), `click_next` clicks that entry link for real too — it's pure
+  navigation, and gated on zero fields being present so it can never be
+  confused with the final Submit. Either real click (Next/Continue or the
+  entry link) waits for the new page to actually render before looping back
+  to `identify` — confirmed live against a real Lever posting, snapshotting
+  immediately after the click read back zero elements, well before the
+  form had actually mounted. **Field identification is AI-driven, not a
+  keyword table**:
   `identify` hands every fillable label on the page — plus the candidate's
   `ApplicantProfile` key names, nothing else — to an LLM
   (`map_fields_to_profile`), which decides which profile key (if any) each
@@ -91,13 +96,31 @@ module docstring in `agent.py` for the full graph shape.
   widget-specific verification (`_select_native_option` /
   `_select_custom_option`) since a real `<select>` and a custom
   react-select-style widget expose their current value completely
-  differently. Clicking "Next" is a real click (it's just page navigation),
-  but the final Submit control is only **shadow-clicked** — highlighted and
+  differently. The click that picks a custom option is itself guarded
+  (`_click_option`) with one retry against a freshly re-located ref before
+  giving up — confirmed live on a real Greenhouse posting, where a
+  ~250-option country-code picker could re-render during the LLM round-trip
+  between reading its options and clicking one, invalidating the ref and
+  raising outright instead of just failing verification; that retry is what
+  turns it back into an ordinary "needs manual review" skip. Clicking
+  "Next" is a real click (it's just page navigation), but the final Submit
+  control is only **shadow-clicked** — highlighted and
   screenshotted to prove the targeting was accurate, never actually clicked
   — same "recommend, don't act" policy as `evaluate_job_listing`'s APPLY
-  decision. Exception handling (a human-in-the-loop pause for CAPTCHAs and
-  free-text custom questions) isn't implemented yet — anything the agent
-  can't confidently handle is just recorded as skipped for now. Unlike
+  decision. **Exception handling is the Week 5 lab**: a CAPTCHA on the page
+  (`_detect_captcha`, a name-based heuristic) or a free-text custom question
+  the profile has no answer for (e.g. "Why do you love Java?" — flagged by
+  the same field-identification call as `custom_question=true`, unlike a
+  demographic dropdown question, which is still a deliberate skip) is
+  escalated to a human instead of silently skipped. `human_review_node`
+  raises this via LangGraph's dynamic `interrupt()` (not the static
+  `interrupt_before` compile option, since which field needs a human is
+  only known after reading the actual page) which suspends the whole graph
+  — state and all — until `run_form_fill`'s CLI loop resumes it with
+  `Command(resume=...)` after prompting in the terminal: solve the CAPTCHA
+  yourself in the visible browser window and press Enter, or type an answer
+  to fill in (blank to skip). See `run_human_review_lab.py` to try it
+  end-to-end against a local mock page built for exactly this. Unlike
   `evaluate_job_listing`, this tool's outcome doesn't need to steer the
   *main* agent graph (only its own internal loop), so it's bound as an
   ordinary domain-agnostic tool in `agent.py`, same as `linkedin_job_search`.
@@ -113,6 +136,14 @@ module docstring in `agent.py` for the full graph shape.
   Greenhouse/Lever application URL to run the same agent against a live
   posting (`python run_form_fill_lab.py <job_application_url>`). Prints a
   summary of what was filled, skipped, and shadow-clicked. Never submits.
+- `run_human_review_lab.py` — standalone script for the Week 5 lab: same
+  pipeline as `run_form_fill_lab.py`, pointed by default at
+  `sample_data/mock_human_review_application.html`, a local mock ATS page
+  built specifically to trigger both kinds of human-in-the-loop escalation
+  — a mock CAPTCHA checkbox and a free-text "Why do you love Java?" custom
+  question — so you can watch `form_fill.py`'s `human_review_node` pause
+  the graph and prompt for input in the terminal, then resume and finish
+  the form once you answer.
 
 ### Resume structuring + vector store
 
@@ -194,6 +225,15 @@ source venv/bin/activate
 python run_form_fill_lab.py [job_application_url]
 ```
 
+Or run the Week 5 human-in-the-loop lab — a local mock page that deliberately
+triggers a CAPTCHA pause and a custom-question pause, so you can see the
+agent hand off to a human and resume:
+
+```bash
+source venv/bin/activate
+python run_human_review_lab.py [job_application_url]
+```
+
 ## Files
 
 - `tools.py`, `linkedin_tool.py`, `evaluation.py`, `form_fill.py` — the four
@@ -222,6 +262,13 @@ python run_form_fill_lab.py [job_application_url]
   ATS application form end-to-end (a local mock page by default, or a real
   Greenhouse/Lever posting if a URL is passed) and print what was filled,
   skipped, and shadow-clicked. Never submits.
+- `sample_data/mock_human_review_application.html` — local mock ATS page
+  used by `run_human_review_lab.py`'s default (no-argument) run; includes a
+  free-text custom question and a mock CAPTCHA checkbox specifically to
+  exercise `human_review_node`'s two escalation paths.
+- `run_human_review_lab.py` — standalone script for the Week 5 lab: same as
+  `run_form_fill_lab.py`, but against a mock page built to trigger the
+  human-in-the-loop pause for a CAPTCHA and a custom question.
 - `agent.py` — the LangGraph graph:
   - `input` reads one line from the terminal.
   - `classify` asks an LLM to route the message as `ACT` / `QUIT` / `OTHER`.

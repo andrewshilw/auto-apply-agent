@@ -1,21 +1,32 @@
-"""Week 4 lab: automated ATS form filling.
+"""Week 4 lab: automated ATS form filling. Week 5 lab: human-in-the-loop
+exception handling layered on top of it.
 
 Given a job application page (Greenhouse, Lever, or similar), this drives
 the same real, visible agent-browser window as `linkedin_tool.py` through a
 LangGraph cycle:
 
-    identify -> fill -> fill_dropdowns -> click_next -+-> identify (another page in a
-                                                        |             multi-step form)
-                                                        +-> END        (no Next button
-                                                                        left, or a Submit
-                                                                        control was found
-                                                                        and shadow-clicked)
+    identify -> fill -> fill_dropdowns -> human_review -> click_next -+-> identify (another page
+                                                                       |             in a multi-step
+                                                                       |             form)
+                                                                       +-> END        (no Next button
+                                                                                       left, or a Submit
+                                                                                       control was found
+                                                                                       and shadow-clicked)
 
-Exception handling — a human-in-the-loop interrupt for CAPTCHAs and
-free-text custom questions the agent has no business guessing at — is
-deliberately not implemented yet; it'll be layered back on separately.
-Right now, a field the agent can't confidently handle is just recorded as
-skipped rather than escalated.
+Week 5: exception handling. A field the agent can't confidently handle used
+to just be recorded as skipped. Two cases are now escalated to a human
+instead: a CAPTCHA on the page, and a free-text custom question the
+profile has no answer for (e.g. "Why do you love Java?") — as opposed to,
+say, a demographic dropdown question, which is still a deliberate skip
+(see `choose_dropdown_option`'s never-guess contract), not something a
+human should be asked to answer on the candidate's behalf. `human_review_node`
+is where both get raised, via LangGraph's *dynamic* `interrupt()` rather
+than the static `interrupt_before` compile-time option: which fields (if
+any) need a human is only known after `identify`/`fill` have read *this*
+page's actual content, not decidable ahead of time from a fixed node name.
+`interrupt()` suspends the whole graph until `run_form_fill`'s CLI loop
+resumes it with `Command(resume=...)` — see `human_review_node` and
+`run_form_fill` for the mechanics.
 
 - `identify` snapshots the current page's interactive elements, then hands
   every fillable field's label — plus the candidate's `ApplicantProfile`
@@ -50,6 +61,17 @@ skipped rather than escalated.
   `map_fields_to_profile`: for something the profile has no real answer for
   (e.g. gender, disability status), the model is instructed to decline
   rather than pick something, which shows up as an ordinary skip.
+- `human_review_node` (Week 5) escalates whatever `identify`/`fill` flagged
+  instead of silently skipping it: a CAPTCHA (`_detect_captcha`, a
+  name-based heuristic run in `identify_node`) or a free-text custom
+  question the AI classified as human-answerable rather than an ordinary
+  unmapped field (`custom_question` on `FieldMapping`, from the same
+  `map_fields_to_profile` call that does field identification). Every
+  `interrupt()` call in this node is resolved — and its answer cached —
+  before any side-effecting browser call runs, since a resumed node
+  re-executes from its own top; doing the actual `_fill_and_verify` calls
+  only after the last interrupt returns keeps each one a one-time effect
+  instead of replaying earlier fills on every subsequent resume.
 - `click_next` looks for a "Next"/"Continue" control among this page's
   buttons and clicks it for real (that's just page navigation, not a
   submission) to loop back to `identify` for the next step. If instead it
@@ -63,12 +85,15 @@ skipped rather than escalated.
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Literal, TypedDict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
 import browser
@@ -88,6 +113,23 @@ ENTRY_APPLY_PATTERNS = ["apply for this job", "apply for this position"]
 
 FILLABLE_ROLES = {"textbox", "combobox"}
 BUTTON_ROLES = {"button", "link"}
+
+# Name-based CAPTCHA detection (Week 5): every real CAPTCHA widget (Google
+# reCAPTCHA, hCaptcha, a plain security checkbox, ...) gives itself away in
+# its accessible name regardless of vendor, so this never needs a
+# per-widget selector. A false negative just means the field is attempted
+# and fails like anything else the agent can't handle; a false positive
+# only costs one confirmation prompt — so this stays a broad heuristic.
+CAPTCHA_PATTERNS = [
+    "captcha",
+    "recaptcha",
+    "hcaptcha",
+    "not a robot",
+    "verify you are human",
+    "prove you are human",
+    "are you human",
+    "security check",
+]
 
 
 class ApplicantProfile(BaseModel):
@@ -116,6 +158,9 @@ class FormFillState(TypedDict):
     max_steps: int
     elements: list[dict]
     field_mapping: dict[str, str | None]  # label -> ApplicantProfile key, decided by the AI mapper
+    custom_questions: list[str]  # labels the AI flagged as human-answerable free-text questions
+    captcha_label: str | None  # accessible name of a detected CAPTCHA element, if any
+    needs_human: list[dict]  # skip-entries for custom_questions, pending human_review_node
     filled: list[dict]
     skipped: list[dict]
     shadow_clicks: list[dict]
@@ -137,6 +182,13 @@ FIELD_MAPPING_PROMPT = (
     "genuinely has no key for. Never invent a key that isn't in the list "
     "below, and never map two different labels to the same key unless they "
     "really are asking the same thing.\n\n"
+    "For every label you leave unmapped, also decide custom_question: true "
+    "only if it's a free-text question a human could meaningfully type an "
+    "answer into directly (e.g. \"Why do you want to work here?\", \"Why do "
+    "you love Java?\", \"Describe a challenging project\"). Set it false for "
+    "anything a typed answer wouldn't make sense for (a file upload, a "
+    "demographic/EEO question, etc.) — those stay ordinary skips, not "
+    "something to hand to a human.\n\n"
     "Profile keys available: {keys}\n\n"
     "Field labels on this page:\n{labels}"
 )
@@ -145,21 +197,30 @@ FIELD_MAPPING_PROMPT = (
 class FieldMapping(BaseModel):
     label: str = Field(description="Verbatim field label, copied exactly from the input list")
     key: str | None = Field(default=None, description="The one matching profile key, or null if nothing matches")
+    custom_question: bool = Field(
+        default=False,
+        description=(
+            "Only meaningful when key is null: true if this is a free-text question a human "
+            "could answer by typing directly into this field, false for anything else"
+        ),
+    )
 
 
 class FieldMappingResult(BaseModel):
     mappings: list[FieldMapping]
 
 
-def map_fields_to_profile(labels: list[str], profile: dict) -> dict[str, str | None]:
+def map_fields_to_profile(labels: list[str], profile: dict) -> tuple[dict[str, str | None], list[str]]:
     """AI takeover for field identification: one batched call maps every
     fillable label on the current page to an `ApplicantProfile` key (or
-    None). Batched per page rather than per field since, unlike dropdown
-    option text (`choose_dropdown_option`), this never needs to interact
-    with the page — every label is already in hand from `identify_node`'s
-    snapshot."""
+    None), *and* — Week 5 — flags which of the unmapped ones are free-text
+    custom questions a human should be asked to answer rather than an
+    ordinary skip. Batched per page rather than per field since, unlike
+    dropdown option text (`choose_dropdown_option`), this never needs to
+    interact with the page — every label is already in hand from
+    `identify_node`'s snapshot. Returns (field_mapping, custom_questions)."""
     if not labels:
-        return {}
+        return {}, []
     llm = ChatAnthropic(model="claude-sonnet-5").with_structured_output(FieldMappingResult, method="json_schema")
     result = llm.invoke(
         FIELD_MAPPING_PROMPT.format(keys=", ".join(profile.keys()), labels="\n".join(f"- {label}" for label in labels))
@@ -169,7 +230,18 @@ def map_fields_to_profile(labels: list[str], profile: dict) -> dict[str, str | N
     # Defensive, same contract as `choose_dropdown_option`: only trust a key
     # that's actually one of the profile's own fields, in case the model
     # invents one anyway despite the prompt telling it not to.
-    return {label: (proposed.get(label) if proposed.get(label) in profile else None) for label in labels}
+    field_mapping = {label: (proposed.get(label) if proposed.get(label) in profile else None) for label in labels}
+    custom_questions = [m.label for m in result.mappings if field_mapping.get(m.label) is None and m.custom_question]
+    return field_mapping, custom_questions
+
+
+def _detect_captcha(elements: list[dict]) -> str | None:
+    """Broad, name-based CAPTCHA heuristic — see `CAPTCHA_PATTERNS`."""
+    for el in elements:
+        normalized = _normalize(el["name"])
+        if any(pattern in normalized for pattern in CAPTCHA_PATTERNS):
+            return el["name"]
+    return None
 
 
 def identify_node(state: FormFillState) -> FormFillState:
@@ -181,8 +253,14 @@ def identify_node(state: FormFillState) -> FormFillState:
     `fill_dropdowns_node`'s fallback) and needs the same mapping ready."""
     elements = browser.snapshot(state["session"])
     labels = [el["name"] for el in elements if el["role"] in FILLABLE_ROLES]
-    field_mapping = map_fields_to_profile(labels, state["profile"])
-    return {"elements": elements, "field_mapping": field_mapping, "step": state["step"] + 1}
+    field_mapping, custom_questions = map_fields_to_profile(labels, state["profile"])
+    return {
+        "elements": elements,
+        "field_mapping": field_mapping,
+        "custom_questions": custom_questions,
+        "captcha_label": _detect_captcha(elements),
+        "step": state["step"] + 1,
+    }
 
 
 def _fill_and_verify(session: str, ref: str, value: str, retries: int = 1) -> bool:
@@ -239,13 +317,25 @@ def fill_node(state: FormFillState) -> FormFillState:
     session = state["session"]
     profile = state["profile"]
     field_mapping = state["field_mapping"]
-    filled, skipped = [], []
+    custom_questions = state["custom_questions"]
+    filled, skipped, needs_human = [], [], []
     for el in state["elements"]:
         if el["role"] != "textbox":
             continue
         f, s = _fill_text_field(session, profile, el, field_mapping)
-        (filled if f else skipped).append(f or s)
-    return {"filled": state["filled"] + filled, "skipped": state["skipped"] + skipped}
+        if f:
+            filled.append(f)
+        elif el["name"] in custom_questions:
+            # Week 5: a custom question the AI declined to guess at isn't an
+            # ordinary skip — it's handed to `human_review_node` instead.
+            needs_human.append(s)
+        else:
+            skipped.append(s)
+    return {
+        "filled": state["filled"] + filled,
+        "skipped": state["skipped"] + skipped,
+        "needs_human": state["needs_human"] + needs_human,
+    }
 
 
 DROPDOWN_PROMPT = (
@@ -313,12 +403,32 @@ def _select_native_option(session: str, select_ref: str, option_ref: str, option
     return browser.run(session, "get", "value", select_ref).strip() == target_value
 
 
+def _click_option(session: str, ref: str, name: str) -> bool:
+    """Focus + click one option element, returning False instead of raising
+    if its ref has already gone stale by the time the click lands, rather
+    than letting that crash the whole form-fill run over a single dropdown.
+    Confirmed live on a real Greenhouse posting: a country-code picker's
+    ~250-option list can re-render between when its options are read
+    (`options_for`) and when one is actually clicked — `choose_dropdown_option`'s
+    LLM round-trip sits in between — so a ref that was perfectly valid a
+    moment earlier can fail outright with "Could not locate element"."""
+    try:
+        browser.focus(session, ref, name)
+        browser.run(session, "click", ref)
+        return True
+    except RuntimeError:
+        return False
+
+
 def _select_custom_option(session: str, combobox_name: str, option_ref: str, option_name: str) -> bool:
     """Custom listbox widget (e.g. a styled EEO dropdown): its options are
     ordinary DOM elements once open, so — unlike a native <select> — this
     can click the option directly, same as any other on-page element.
 
-    Verified three ways, layered as fallbacks, since no single one held up
+    The click itself is guarded (`_click_option`) with one retry against a
+    freshly re-located ref before giving up on it entirely — see there for
+    why the original ref can go stale. Once the click actually lands,
+    verification is layered three ways, since no single check held up
     against every real widget encountered on a live Greenhouse posting:
 
     1. Compare the combobox's own displayed text against `option_name` —
@@ -343,8 +453,13 @@ def _select_custom_option(session: str, combobox_name: str, option_ref: str, opt
     `combobox_name` (not a ref) is what re-finds it across every check: the
     click that closed the dropdown already invalidated every ref from
     before it."""
-    browser.focus(session, option_ref, option_name)
-    browser.run(session, "click", option_ref)
+    if not _click_option(session, option_ref, option_name):
+        elements = browser.snapshot(session)
+        combobox = next((e for e in elements if e["role"] == "combobox" and e["name"] == combobox_name), None)
+        options = browser.options_for(elements, combobox["ref"]) if combobox else []
+        retry = next((o for o in options if o["name"] == option_name), None)
+        if retry is None or not _click_option(session, retry["ref"], option_name):
+            return False
     time.sleep(0.3)
 
     elements = browser.snapshot(session)
@@ -452,6 +567,74 @@ def fill_dropdowns_node(state: FormFillState) -> FormFillState:
     return {"filled": state["filled"] + filled, "skipped": state["skipped"] + skipped}
 
 
+def human_review_node(state: FormFillState) -> FormFillState:
+    """Week 5's human-in-the-loop pause. Escalates whatever `identify`/`fill`
+    flagged instead of letting it fall through as a silent skip:
+
+    1. A CAPTCHA (`captcha_label`, from `_detect_captcha`) — the agent can't
+       solve it, so it just asks the human to solve it themselves in the
+       visible browser window and confirm.
+    2. Free-text custom questions (`needs_human`) — a "Why do you love
+       Java?"-style question the profile has no answer for. The human types
+       an answer (or leaves it blank to skip), and this node types it into
+       the actual field.
+
+    Each `interrupt()` call suspends the *entire graph*, not just this node,
+    until `run_form_fill`'s CLI loop resumes it with `Command(resume=...)`.
+    All interrupts are resolved — and their answers cached in `answers` —
+    before any `_fill_and_verify` call runs: a resumed node re-executes from
+    its own top, and every earlier `interrupt()` in that replay just returns
+    its cached value instead of pausing again, so a fill that happened
+    *before* a later interrupt in this same node would otherwise repeat on
+    every subsequent resume. Doing the real fills only after the last
+    interrupt has returned keeps each one a one-time effect.
+    """
+    if state["captcha_label"]:
+        interrupt(
+            {
+                "type": "captcha",
+                "label": state["captcha_label"],
+                "message": (
+                    f'CAPTCHA detected ("{state["captcha_label"]}"). Solve it yourself in the '
+                    "visible browser window, then confirm to continue."
+                ),
+            }
+        )
+
+    answers: dict[str, str] = {}
+    for item in state["needs_human"]:
+        answer = interrupt(
+            {
+                "type": "custom_question",
+                "label": item["label"],
+                "message": (
+                    f'The application asks: "{item["label"]}" — this isn\'t in the candidate\'s '
+                    "profile. Type an answer to fill it in, or leave it blank to skip."
+                ),
+            }
+        )
+        answers[item["label"]] = (answer or "").strip()
+
+    session = state["session"]
+    filled, skipped = [], []
+    for item in state["needs_human"]:
+        answer = answers[item["label"]]
+        if answer:
+            browser.focus(session, item["ref"], item["label"])
+        if answer and _fill_and_verify(session, item["ref"], answer):
+            filled.append({"label": item["label"], "key": "human", "value": answer})
+        else:
+            reason = "left blank by human review" if not answer else "fill did not persist — needs manual review"
+            skipped.append({**item, "reason": reason})
+
+    return {
+        "filled": state["filled"] + filled,
+        "skipped": state["skipped"] + skipped,
+        "needs_human": [],
+        "captcha_label": None,
+    }
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]", " ", text.lower())
 
@@ -466,6 +649,17 @@ def _find_button(elements: list[dict], patterns: list[str]) -> dict | None:
     return None
 
 
+def _wait_for_navigation(session: str) -> None:
+    """After a real click that navigates (Next/Continue, or the Lever-style
+    entry link), give the new page a moment to actually render before the
+    graph loops back to `identify_node` and snapshots it. Confirmed live
+    against a real Lever posting: snapshotting immediately after the click
+    (no wait at all) caught the page mid-navigation and read back zero
+    elements, well before the ~2s it actually took the real form to mount."""
+    browser.run(session, "wait", "--load", "domcontentloaded")
+    time.sleep(1.5)
+
+
 def click_next_node(state: FormFillState) -> FormFillState:
     session = state["session"]
     elements = state["elements"]
@@ -474,6 +668,7 @@ def click_next_node(state: FormFillState) -> FormFillState:
     if next_button:
         browser.focus(session, next_button["ref"], next_button["name"])
         browser.run(session, "click", next_button["ref"])
+        _wait_for_navigation(session)
         return {"advanced": True}
 
     submit_button = _find_button(elements, SUBMIT_BUTTON_PATTERNS)
@@ -493,6 +688,7 @@ def click_next_node(state: FormFillState) -> FormFillState:
         if entry_button:
             browser.focus(session, entry_button["ref"], entry_button["name"])
             browser.run(session, "click", entry_button["ref"])
+            _wait_for_navigation(session)
             return {"advanced": True}
 
     return {"advanced": False}
@@ -509,15 +705,24 @@ def build_form_fill_graph():
     graph.add_node("identify", identify_node)
     graph.add_node("fill", fill_node)
     graph.add_node("fill_dropdowns", fill_dropdowns_node)
+    graph.add_node("human_review", human_review_node)
     graph.add_node("click_next", click_next_node)
 
     graph.add_edge(START, "identify")
     graph.add_edge("identify", "fill")
     graph.add_edge("fill", "fill_dropdowns")
-    graph.add_edge("fill_dropdowns", "click_next")
+    graph.add_edge("fill_dropdowns", "human_review")
+    graph.add_edge("human_review", "click_next")
     graph.add_conditional_edges("click_next", route_after_click_next, {"identify": "identify", END: END})
 
-    return graph.compile()
+    # A checkpointer is what makes `human_review_node`'s `interrupt()` calls
+    # actually pause-and-resume (Week 5) rather than just raise: LangGraph
+    # needs somewhere to persist the in-flight state between the `invoke()`
+    # that hits the interrupt and the later one that resumes it with
+    # `Command(resume=...)`. In-memory is enough here — each `run_form_fill`
+    # call gets its own fresh thread id, so nothing needs to survive the
+    # process.
+    return graph.compile(checkpointer=MemorySaver())
 
 
 def format_summary(state: FormFillState) -> str:
@@ -539,16 +744,37 @@ def format_summary(state: FormFillState) -> str:
     return "\n".join(lines)
 
 
+def _prompt_human(payload: dict) -> str:
+    """The Week 5 CLI human-takeover UI: knows nothing about LangGraph
+    itself, only the plain dict `human_review_node` called `interrupt()`
+    with. A CAPTCHA needs no typed answer, just a confirmation once it's
+    solved by hand in the visible browser window; a custom question gets
+    whatever the human types back (blank to skip it)."""
+    print(f"\n[Human review needed] {payload['message']}")
+    if payload["type"] == "captcha":
+        input("Press Enter once you've solved it in the browser window... ")
+        return "ok"
+    return input("Your answer (blank to skip): ")
+
+
 def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_steps: int = MAX_FORM_STEPS) -> str:
     """Full pipeline: open the application page, then run the
-    identify/fill/fill_dropdowns/click_next graph until it either
-    shadow-clicks a Submit control or runs out of Next buttons/steps."""
+    identify/fill/fill_dropdowns/human_review/click_next graph until it
+    either shadow-clicks a Submit control or runs out of Next buttons/steps.
+    Also owns the Week 5 human-in-the-loop resume loop: whenever
+    `human_review_node` raises an interrupt (a CAPTCHA or a custom
+    question), `graph.invoke()` returns with a `__interrupt__` key instead
+    of running to completion — this loop prompts for an answer in the
+    terminal (`_prompt_human`) and calls `graph.invoke(Command(resume=...))`
+    to pick the graph back up exactly where it paused, repeating for as many
+    interrupts as the page raises."""
     browser.open_url(SESSION_NAME, job_url)
     browser.run(SESSION_NAME, "wait", "--load", "domcontentloaded")
     time.sleep(1.5)  # let JS-embedded application widgets (e.g. Greenhouse's) finish mounting
 
     graph = build_form_fill_graph()
-    final_state = graph.invoke(
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    state = graph.invoke(
         {
             "session": SESSION_NAME,
             "profile": (profile or load_profile()).model_dump(),
@@ -556,13 +782,20 @@ def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_ste
             "max_steps": max_steps,
             "elements": [],
             "field_mapping": {},
+            "custom_questions": [],
+            "captcha_label": None,
+            "needs_human": [],
             "filled": [],
             "skipped": [],
             "shadow_clicks": [],
             "advanced": False,
-        }
+        },
+        config=config,
     )
-    return format_summary(final_state)
+    while "__interrupt__" in state:
+        answer = _prompt_human(state["__interrupt__"][0].value)
+        state = graph.invoke(Command(resume=answer), config=config)
+    return format_summary(state)
 
 
 @tool
@@ -570,10 +803,13 @@ def fill_application_form(job_url: str) -> str:
     """Open a job application form (e.g. Greenhouse or Lever) in a real,
     visible browser and fill in the fields it recognizes from the
     candidate's applicant profile via AI-driven field identification,
-    following "Next"/"Continue" through every step of a multi-page form.
-    Anything it can't confidently handle (a free-text essay question, a
-    CAPTCHA, a dropdown with no clear match) is left skipped rather than
-    guessed at. Never submits — the final Submit control is only
-    highlighted (a "shadow click") to prove it was found accurately, never
-    actually clicked."""
+    following "Next"/"Continue" through every step of a multi-page form. A
+    dropdown with no clear match (e.g. a demographic/EEO question) is left
+    skipped rather than guessed at. A CAPTCHA or a free-text custom
+    question the profile has no answer for (e.g. "Why do you love Java?")
+    instead pauses and asks for human input in the terminal — solve the
+    CAPTCHA yourself in the visible browser window, or type an answer to
+    fill in, then execution resumes automatically. Never submits — the
+    final Submit control is only highlighted (a "shadow click") to prove it
+    was found accurately, never actually clicked."""
     return run_form_fill(job_url)
