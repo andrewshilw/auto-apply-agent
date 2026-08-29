@@ -65,6 +65,10 @@ def parse_snapshot(text: str) -> list[dict]:
                 "name": role_match.group("name"),
                 "ref": ref_match.group(1),
                 "url": url_match.group(1) if url_match else None,
+                # ARIA marks the current pick with "[selected, ...]" on re-open
+                # regardless of how a custom widget renders its own closed-state
+                # display — see `form_fill._select_custom_option`.
+                "selected": "[selected" in line,
             }
         )
     return elements
@@ -80,6 +84,46 @@ def find_ref(elements: list[dict], role: str, name_contains: str) -> str:
         if el["role"] == role and name_contains.lower() in el["name"].lower():
             return el["ref"]
     raise RuntimeError(f'Could not find a {role} containing "{name_contains}" on the page.')
+
+
+def options_for(elements: list[dict], combobox_ref: str) -> list[dict]:
+    """The option elements belonging to one combobox, read off a single
+    `snapshot()` call. agent-browser nests a dropdown's `option` children
+    directly under it in the snapshot text (indented), but `parse_snapshot`
+    flattens indentation away and keeps only document order — so a
+    combobox's own options are exactly the run of consecutive `option`-role
+    elements that appear after it, before the next real form field. This is
+    true both for a native `<select>` (its options are present in every
+    snapshot, no interaction needed) and for a custom listbox widget (only
+    true right after the combobox has been clicked open — see
+    `form_fill.fill_dropdowns_node`, which is why this always takes a
+    freshly-taken `elements` list rather than a cached one).
+
+    Real ATS widgets (confirmed on a live Greenhouse posting) put a chunk of
+    the combobox's own chrome between it and its options — e.g. a "Toggle
+    flyout" button that's present whether the dropdown is open or not, then
+    an (often unlabeled, so nameless in the snapshot) `listbox` wrapper —
+    rather than the options sitting immediately adjacent. So this skips over
+    anything that isn't itself an option, stopping only once it either (a)
+    hits a real option run and then that run ends, or (b) reaches the next
+    textbox/combobox — a genuinely different field — without finding any,
+    which correctly reports "no options" for a combobox that isn't really a
+    dropdown (e.g. a type-to-search location field whose listbox opens empty
+    until you type into it)."""
+    start = next((i for i, el in enumerate(elements) if el["ref"] == combobox_ref), None)
+    if start is None:
+        return []
+    options = []
+    for el in elements[start + 1 :]:
+        if el["role"] == "option":
+            options.append(el)
+        elif options:
+            break  # a contiguous run of options just ended
+        elif el["role"] in ("textbox", "combobox"):
+            break  # reached the next real field without finding any options
+        # else: skip this combobox's own chrome (toggle button, listbox
+        # wrapper, "locate me"/attach buttons, ...) and keep looking
+    return options
 
 
 def focus(session: str, ref: str, label: str) -> None:

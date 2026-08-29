@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock ATS Application — Week 6 Dropdown Lab</title>
+</head>
+<body>
+<h1>Apply: Backend Engineer</h1>
+<form>
+  <label for="first_name">First Name</label>
+  <input type="text" id="first_name" name="first_name">
+
+  <label for="last_name">Last Name</label>
+  <input type="text" id="last_name" name="last_name">
+
+  <label for="email">Email</label>
+  <input type="email" id="email" name="email">
+
+  <!-- Native <select>, worded so a literal string match against the
+       profile's "Yes"/"No" values would fail — only reading the option's
+       actual meaning gets this right. -->
+  <label for="work_auth">Are you legally authorized to work in the United States? *</label>
+  <select id="work_auth" name="work_auth">
+    <option value="">Please select</option>
+    <option value="yes_auth">I am authorized to work in the US without sponsorship</option>
+    <option value="no_auth">I am not authorized to work in the US</option>
+  </select>
+
+  <label for="sponsorship">Will you now or in the future require visa sponsorship? *</label>
+  <select id="sponsorship" name="sponsorship">
+    <option value="">Please select</option>
+    <option value="need_sponsorship">I will require sponsorship</option>
+    <option value="no_sponsorship">I will not require sponsorship</option>
+  </select>
+
+  <!-- Custom (non-native) dropdown widget, styled like Greenhouse's own EEO
+       questions. The applicant profile has no field for this on purpose:
+       proves the AI declines instead of guessing a demographic answer. -->
+  <label id="gender_label">Gender</label>
+  <div id="gender" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-label="Gender" tabindex="0"
+       style="display:inline-block;border:1px solid #767676;padding:4px 8px;min-width:220px;">
+    Select...
+  </div>
+  <ul id="gender_list" role="listbox" aria-label="Gender options"
+      style="display:none;list-style:none;padding:0;margin:0;border:1px solid #767676;width:220px;">
+    <li role="option" tabindex="0" style="padding:4px 8px;">Male</li>
+    <li role="option" tabindex="0" style="padding:4px 8px;">Female</li>
+    <li role="option" tabindex="0" style="padding:4px 8px;">Decline to self-identify</li>
+  </ul>
+
+  <button type="button">Submit Application</button>
+</form>
+
+<script>
+const box = document.getElementById('gender');
+const list = document.getElementById('gender_list');
+box.addEventListener('click', () => {
+  const open = list.style.display !== 'none';
+  list.style.display = open ? 'none' : 'block';
+  box.setAttribute('aria-expanded', String(!open));
+});
+list.querySelectorAll('li').forEach((li) => {
+  li.addEventListener('click', () => {
+    box.textContent = li.textContent;
+    list.style.display = 'none';
+    box.setAttribute('aria-expanded', 'false');
+  });
+});
+</script>
+</body>
+</html>
