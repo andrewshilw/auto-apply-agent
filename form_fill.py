@@ -767,35 +767,42 @@ def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_ste
     of running to completion — this loop prompts for an answer in the
     terminal (`_prompt_human`) and calls `graph.invoke(Command(resume=...))`
     to pick the graph back up exactly where it paused, repeating for as many
-    interrupts as the page raises."""
-    browser.open_url(SESSION_NAME, job_url)
-    browser.run(SESSION_NAME, "wait", "--load", "domcontentloaded")
-    time.sleep(1.5)  # let JS-embedded application widgets (e.g. Greenhouse's) finish mounting
+    interrupts as the page raises. Always closes the ATS session's browser
+    before returning (success or error) — unlike the LinkedIn session, this
+    one doesn't need to stay logged in between runs, and leaving it open
+    would let a stale tab from this run resurface the next time the same
+    session name is reused (see `browser.close_session`)."""
+    try:
+        browser.open_url(SESSION_NAME, job_url)
+        browser.run(SESSION_NAME, "wait", "--load", "domcontentloaded")
+        time.sleep(1.5)  # let JS-embedded application widgets (e.g. Greenhouse's) finish mounting
 
-    graph = build_form_fill_graph()
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    state = graph.invoke(
-        {
-            "session": SESSION_NAME,
-            "profile": (profile or load_profile()).model_dump(),
-            "step": 0,
-            "max_steps": max_steps,
-            "elements": [],
-            "field_mapping": {},
-            "custom_questions": [],
-            "captcha_label": None,
-            "needs_human": [],
-            "filled": [],
-            "skipped": [],
-            "shadow_clicks": [],
-            "advanced": False,
-        },
-        config=config,
-    )
-    while "__interrupt__" in state:
-        answer = _prompt_human(state["__interrupt__"][0].value)
-        state = graph.invoke(Command(resume=answer), config=config)
-    return format_summary(state)
+        graph = build_form_fill_graph()
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        state = graph.invoke(
+            {
+                "session": SESSION_NAME,
+                "profile": (profile or load_profile()).model_dump(),
+                "step": 0,
+                "max_steps": max_steps,
+                "elements": [],
+                "field_mapping": {},
+                "custom_questions": [],
+                "captcha_label": None,
+                "needs_human": [],
+                "filled": [],
+                "skipped": [],
+                "shadow_clicks": [],
+                "advanced": False,
+            },
+            config=config,
+        )
+        while "__interrupt__" in state:
+            answer = _prompt_human(state["__interrupt__"][0].value)
+            state = graph.invoke(Command(resume=answer), config=config)
+        return format_summary(state)
+    finally:
+        browser.close_session(SESSION_NAME)
 
 
 @tool

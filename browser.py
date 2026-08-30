@@ -47,6 +47,16 @@ def open_url(session: str, url: str, headed: bool = True) -> None:
     run(session, *args)
 
 
+def close_session(session: str) -> None:
+    """Shut down the session's browser process. Idempotent — safe to call
+    even if the session was never opened or was already closed, so callers
+    can unconditionally clean up in a `finally` block. Without this, the
+    session (and any tabs left open in it, e.g. from a previous run against
+    a different job posting) stays alive in the background and resurfaces
+    the next time the same session name is reused."""
+    run(session, "close")
+
+
 def current_url(session: str) -> str:
     return run(session, "get", "url").strip()
 
