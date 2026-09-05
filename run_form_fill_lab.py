@@ -34,7 +34,10 @@ DEFAULT_FIXTURE = Path(__file__).parent / "sample_data" / "mock_dropdown_applica
 
 def run(job_url: str) -> None:
     print(f"Filling application form at: {job_url}\n")
-    print(run_form_fill(job_url))
+    # Week 6: close_when_done=False — this is a manual lab run, so leave the
+    # filled-out form visible in its window afterward for inspection instead
+    # of closing it the instant the graph finishes.
+    print(run_form_fill(job_url, close_when_done=False))
 
 
 if __name__ == "__main__":

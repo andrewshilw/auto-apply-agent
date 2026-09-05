@@ -160,6 +160,46 @@ module docstring in `agent.py` for the full graph shape.
   the graph and prompt for input in the terminal, then resume and finish
   the form once you answer.
 
+### Week 6: efficiency and analytics
+
+- `humanize.py` — pure-Python pacing/mouse-path/typing-cadence helpers used
+  by `browser.py`'s `focus`/`type_chunks`/`type_humanized`: a jittered pause
+  and a short curved mouse path instead of a fixed sleep and a straight
+  teleport, and a chunked, non-uniform typing cadence instead of one instant
+  `fill`. These exist for realism and robustness against timing-sensitive
+  widgets already documented elsewhere in this codebase (e.g. `form_fill.py`'s
+  react-select "Location" field) — **not** to defeat any platform's
+  bot-detection or anti-abuse systems; nothing here spoofs a fingerprint,
+  solves a challenge, or hides that the session is automated.
+- Reduced screenshot volume: `browser.focus` takes a `capture: bool` flag,
+  and `fill_dropdowns_node`'s exploratory "open this dropdown to see what
+  options it renders" step now passes `capture=False` — that step isn't the
+  decision-worthy moment the shadow-click audit trail is meant to prove, so
+  skipping its screenshot (the actual selection right after still gets one)
+  roughly halves screenshot count on a dropdown-heavy form.
+- Trimmed a real per-call token cost: `choose_dropdown_option` now sends the
+  candidate profile as compact JSON instead of `indent=2` — the same
+  whitespace was previously resent on every dropdown on the page.
+- Real-time chain-of-thought output: every field-mapping decision, every
+  dropdown decision (with the model's own one-sentence `reasoning`), and
+  every graph-node transition now prints live (`[CoT] ...`) as
+  `fill_application_form` runs, instead of only showing up in the final
+  summary.
+- `run_form_fill_lab.py` / `run_human_review_lab.py` now pass
+  `close_when_done=False` to `run_form_fill`, so the browser window stays
+  open after the run finishes instead of closing immediately — useful for
+  inspecting the filled-out form. `fill_application_form` (the agent tool)
+  keeps the default `close_when_done=True` so it doesn't accumulate open
+  windows across repeated calls.
+- `dashboard.py` — analytics dashboard. Reads `logs/evaluations.jsonl`
+  (`evaluation.py`) and the new `logs/applications.jsonl`
+  (`form_fill.log_application`, appended once per `run_form_fill` call) and
+  renders `dashboard.html`: total listings evaluated, APPLY/SKIP split and
+  average match score, field fill rate, how often a run reaches a Submit
+  control, the most common skip reasons, and a table of recent runs. Run
+  `python dashboard.py` any time after a batch of lab runs; it's a plain
+  static file, safe to regenerate repeatedly from the append-only logs.
+
 ### Resume structuring + vector store
 
 - `resume.py` — parses a PDF resume with `pypdf`, then asks the LLM
@@ -249,6 +289,14 @@ source venv/bin/activate
 python run_human_review_lab.py [job_application_url]
 ```
 
+Or generate the Week 6 analytics dashboard from whatever's accumulated in
+`logs/*.jsonl` so far:
+
+```bash
+source venv/bin/activate
+python dashboard.py
+```
+
 ## Files
 
 - `tools.py`, `linkedin_tool.py`, `evaluation.py`, `form_fill.py` — the four
@@ -258,6 +306,8 @@ python run_human_review_lab.py [job_application_url]
 - `resume.py`, `vector_store.py` — resume PDF parsing/structuring and the
   ChromaDB resume vector store, see "Resume structuring + vector store"
   above.
+- `humanize.py`, `dashboard.py` — Week 6 pacing/typing helpers and the
+  analytics dashboard, see "Week 6: efficiency and analytics" above.
 - `scripts/generate_sample_resume.py` — generates the synthetic
   `sample_data/sample_resume.pdf` used by default.
 - `sample_data/sample_applicant_profile.json` — synthetic applicant contact

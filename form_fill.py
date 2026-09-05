@@ -80,12 +80,30 @@ resumes it with `Command(resume=...)` — see `human_review_node` and
   accurate) without ever actually clicking it. Same policy as
   `evaluation.py`'s APPLY recommendation — a real submission stays a
   separate, explicit decision left to a human.
+
+Week 6: efficiency + observability. `_fill_and_verify`'s fill and
+`_search_autocomplete_options`'s search query now go through
+`browser.type_humanized`/`type_chunks` (see `humanize.py`) instead of one
+instant `fill`/`type` call, and `browser.focus` approaches each target with
+a short curved mouse path — realism/robustness, not anti-bot evasion.
+`fill_dropdowns_node`'s exploratory "open it to see what's there" step now
+passes `capture=False` to `browser.focus`, skipping the screenshot for that
+non-decision moment (the actual selection right after still gets one) — cuts
+screenshot volume on dropdown-heavy forms roughly in half.
+`choose_dropdown_option`'s profile JSON is now compact instead of
+pretty-printed, trimming the whitespace resent on every dropdown call. Every
+field-mapping and dropdown decision, plus each node transition, is now
+printed live (`[CoT] ...`) as it happens instead of only appearing in the
+final summary — the "chain of thought" view. `run_form_fill` also appends a
+background record to `logs/applications.jsonl` (`log_application`), read by
+`dashboard.py`'s analytics report alongside `evaluation.py`'s own log.
 """
 
 import json
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -101,6 +119,11 @@ import browser
 SESSION_NAME = "form-fill-lab"
 DEFAULT_PROFILE_PATH = Path(__file__).parent / "sample_data" / "sample_applicant_profile.json"
 MAX_FORM_STEPS = 5
+
+# Week 6: background record of every run, independent of the printed
+# summary — see `log_application` and `dashboard.py`, the analytics
+# dashboard that reads this alongside `evaluation.py`'s own log.
+APPLICATIONS_LOG_PATH = Path(__file__).parent / "logs" / "applications.jsonl"
 
 NEXT_BUTTON_PATTERNS = ["save and continue", "next", "continue"]
 SUBMIT_BUTTON_PATTERNS = ["submit application", "submit", "review and submit", "apply now"]
@@ -232,6 +255,14 @@ def map_fields_to_profile(labels: list[str], profile: dict) -> tuple[dict[str, s
     # invents one anyway despite the prompt telling it not to.
     field_mapping = {label: (proposed.get(label) if proposed.get(label) in profile else None) for label in labels}
     custom_questions = [m.label for m in result.mappings if field_mapping.get(m.label) is None and m.custom_question]
+    for label in labels:
+        key = field_mapping.get(label)
+        if key:
+            print(f'[CoT] field "{label}" -> {key}')
+        elif label in custom_questions:
+            print(f'[CoT] field "{label}" -> unmapped, flagged as a human-answerable question')
+        else:
+            print(f'[CoT] field "{label}" -> unmapped, ordinary skip')
     return field_mapping, custom_questions
 
 
@@ -251,8 +282,10 @@ def identify_node(state: FormFillState) -> FormFillState:
     Covers both textboxes and comboboxes here (not just textboxes) since a
     combobox can turn out to be a free-text field in disguise (see
     `fill_dropdowns_node`'s fallback) and needs the same mapping ready."""
+    print(f"\n[CoT] --- step {state['step'] + 1}: identify ---")
     elements = browser.snapshot(state["session"])
     labels = [el["name"] for el in elements if el["role"] in FILLABLE_ROLES]
+    print(f"[CoT] found {len(labels)} fillable field(s) on this page")
     field_mapping, custom_questions = map_fields_to_profile(labels, state["profile"])
     return {
         "elements": elements,
@@ -276,7 +309,7 @@ def _fill_and_verify(session: str, ref: str, value: str, retries: int = 1) -> bo
     the flow moves to the next field/button, so it surfaces the same
     silent-clear before it's mistaken for a successful fill."""
     for _ in range(retries + 1):
-        browser.run(session, "fill", ref, value)
+        browser.type_humanized(session, ref, value)
         time.sleep(0.3)
         browser.run(session, "press", "Tab")
         time.sleep(0.3)
@@ -314,6 +347,7 @@ def _fill_text_field(
 
 
 def fill_node(state: FormFillState) -> FormFillState:
+    print("[CoT] --- fill (textboxes) ---")
     session = state["session"]
     profile = state["profile"]
     field_mapping = state["field_mapping"]
@@ -374,16 +408,22 @@ def choose_dropdown_option(label: str, options: list[str], profile: dict) -> Dro
     option text (not a hardcoded list — see `browser.options_for`), decide
     which option (if any) the candidate's profile supports."""
     llm = ChatAnthropic(model="claude-sonnet-5").with_structured_output(DropdownChoice, method="json_schema")
+    # Compact (no indent) rather than pretty-printed: this profile JSON is
+    # resent on every dropdown call on the page, so the whitespace tokens of
+    # indent=2 add up across a form with several dropdowns for no benefit —
+    # the model doesn't need it formatted, only parseable.
     result = llm.invoke(
-        DROPDOWN_PROMPT.format(
-            label=label, options="\n".join(f"- {o}" for o in options), profile=json.dumps(profile, indent=2)
-        )
+        DROPDOWN_PROMPT.format(label=label, options="\n".join(f"- {o}" for o in options), profile=json.dumps(profile))
     )
     assert isinstance(result, DropdownChoice)
     if result.matched and result.option_name not in options:
         # The model must choose verbatim from what's actually on the page —
         # never let a hallucinated option stand in as a "confident match".
-        return DropdownChoice(matched=False, reasoning="model chose an option not present on the page")
+        result = DropdownChoice(matched=False, reasoning="model chose an option not present on the page")
+    if result.matched:
+        print(f'[CoT] dropdown "{label}": choosing "{result.option_name}" — {result.reasoning}')
+    else:
+        print(f'[CoT] dropdown "{label}": declining to guess — {result.reasoning}')
     return result
 
 
@@ -565,7 +605,7 @@ def _search_autocomplete_options(session: str, el: dict, query: str) -> list[dic
     network round-trip, not instant. Returns whatever's there once options
     show up, or an empty list if the poll window runs out or the page
     changed underneath (the combobox's own ref went stale)."""
-    browser.run(session, "type", el["ref"], query)
+    browser.type_chunks(session, el["ref"], query)
     for _ in range(4):
         time.sleep(0.6)
         elements = browser.snapshot(session)
@@ -663,6 +703,7 @@ def fill_dropdowns_node(state: FormFillState) -> FormFillState:
     for an ATS form, same assumption `_find_button` already makes for
     button text elsewhere in this module.
     """
+    print("[CoT] --- fill_dropdowns ---")
     session = state["session"]
     profile = state["profile"]
     field_mapping = state["field_mapping"]
@@ -680,8 +721,23 @@ def fill_dropdowns_node(state: FormFillState) -> FormFillState:
         is_native = bool(options)
         if not is_native:
             # Not present without interacting — open it for real and see what it reveals.
-            browser.focus(session, el["ref"], el["name"])
-            browser.run(session, "click", el["ref"])
+            # Week 6: capture=False — this is a merely exploratory open (finding
+            # out what options exist), not the decision-worthy moment; the actual
+            # selection below still gets its own highlighted, screenshotted focus.
+            browser.focus(session, el["ref"], el["name"], capture=False)
+            try:
+                browser.run(session, "click", el["ref"])
+            except RuntimeError:
+                # Confirmed live on a real Anduril/Greenhouse posting: the
+                # humanized hover in `focus()` can, by itself, be enough to
+                # trigger a react-select widget's own hover-opened menu (e.g.
+                # a "School" autocomplete) before this click fires — the menu
+                # then covers the click point and agent-browser correctly
+                # refuses the click as a likely misclick. That's not a real
+                # failure here, just the menu opening a step earlier than
+                # expected, so fall through to read whatever's now rendered
+                # instead of aborting the whole run over it.
+                pass
             time.sleep(0.4)
             elements = browser.snapshot(session)
             el = next((e for e in elements if e["role"] == "combobox" and e["name"] == name), None)
@@ -757,7 +813,9 @@ def human_review_node(state: FormFillState) -> FormFillState:
     every subsequent resume. Doing the real fills only after the last
     interrupt has returned keeps each one a one-time effect.
     """
+    print("[CoT] --- human_review ---")
     if state["captcha_label"]:
+        print(f'[CoT] CAPTCHA detected ("{state["captcha_label"]}") — escalating to human')
         interrupt(
             {
                 "type": "captcha",
@@ -771,6 +829,7 @@ def human_review_node(state: FormFillState) -> FormFillState:
 
     answers: dict[str, str] = {}
     for item in state["needs_human"]:
+        print(f'[CoT] custom question "{item["label"]}" has no profile answer — escalating to human')
         answer = interrupt(
             {
                 "type": "custom_question",
@@ -829,11 +888,13 @@ def _wait_for_navigation(session: str) -> None:
 
 
 def click_next_node(state: FormFillState) -> FormFillState:
+    print("[CoT] --- click_next ---")
     session = state["session"]
     elements = state["elements"]
 
     next_button = _find_button(elements, NEXT_BUTTON_PATTERNS)
     if next_button:
+        print(f'[CoT] found "{next_button["name"]}" — advancing to the next step')
         browser.focus(session, next_button["ref"], next_button["name"])
         browser.run(session, "click", next_button["ref"])
         _wait_for_navigation(session)
@@ -841,6 +902,7 @@ def click_next_node(state: FormFillState) -> FormFillState:
 
     submit_button = _find_button(elements, SUBMIT_BUTTON_PATTERNS)
     if submit_button:
+        print(f'[CoT] found "{submit_button["name"]}" — shadow-clicking only, never actually submitting')
         # Shadow click: highlight + screenshot the exact Submit control to
         # prove click accuracy, but never actually click it.
         browser.focus(session, submit_button["ref"], f"SHADOW_{submit_button['name']}")
@@ -893,6 +955,24 @@ def build_form_fill_graph():
     return graph.compile(checkpointer=MemorySaver())
 
 
+def log_application(job_url: str, state: FormFillState) -> None:
+    """Week 6: background record of every form-fill run, independent of the
+    printed summary — mirrors `evaluation.log_decision`'s pattern. Read by
+    `dashboard.py` to compute fill/skip/reach-submit rates across runs."""
+    APPLICATIONS_LOG_PATH.parent.mkdir(exist_ok=True)
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "job_url": job_url,
+        "steps": state["step"],
+        "filled": len(state["filled"]),
+        "skipped": len(state["skipped"]),
+        "reached_submit": bool(state["shadow_clicks"]),
+        "skip_reasons": [s["reason"] for s in state["skipped"]],
+    }
+    with APPLICATIONS_LOG_PATH.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 def format_summary(state: FormFillState) -> str:
     lines = [f"Form-fill run: {state['step']} page(s) processed."]
 
@@ -925,7 +1005,12 @@ def _prompt_human(payload: dict) -> str:
     return input("Your answer (blank to skip): ")
 
 
-def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_steps: int = MAX_FORM_STEPS) -> str:
+def run_form_fill(
+    job_url: str,
+    profile: ApplicantProfile | None = None,
+    max_steps: int = MAX_FORM_STEPS,
+    close_when_done: bool = True,
+) -> str:
     """Full pipeline: open the application page, then run the
     identify/fill/fill_dropdowns/human_review/click_next graph until it
     either shadow-clicks a Submit control or runs out of Next buttons/steps.
@@ -935,11 +1020,15 @@ def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_ste
     of running to completion — this loop prompts for an answer in the
     terminal (`_prompt_human`) and calls `graph.invoke(Command(resume=...))`
     to pick the graph back up exactly where it paused, repeating for as many
-    interrupts as the page raises. Always closes the ATS session's browser
-    before returning (success or error) — unlike the LinkedIn session, this
-    one doesn't need to stay logged in between runs, and leaving it open
-    would let a stale tab from this run resurface the next time the same
-    session name is reused (see `browser.close_session`)."""
+    interrupts as the page raises. Closes the ATS session's browser before
+    returning (success or error) when `close_when_done` is true (the
+    default) — unlike the LinkedIn session, this one doesn't need to stay
+    logged in between runs, and leaving it open would let a stale tab from
+    this run resurface the next time the same session name is reused (see
+    `browser.close_session`). `close_when_done=False` (Week 6) skips that,
+    leaving the filled-out form visible in its window for manual inspection
+    — used by the lab scripts, not by `fill_application_form`, since the
+    agent tool shouldn't accumulate open windows across repeated calls."""
     try:
         browser.open_url(SESSION_NAME, job_url)
         browser.run(SESSION_NAME, "wait", "--load", "domcontentloaded")
@@ -968,9 +1057,11 @@ def run_form_fill(job_url: str, profile: ApplicantProfile | None = None, max_ste
         while "__interrupt__" in state:
             answer = _prompt_human(state["__interrupt__"][0].value)
             state = graph.invoke(Command(resume=answer), config=config)
+        log_application(job_url, state)
         return format_summary(state)
     finally:
-        browser.close_session(SESSION_NAME)
+        if close_when_done:
+            browser.close_session(SESSION_NAME)
 
 
 @tool

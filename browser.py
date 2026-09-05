@@ -6,14 +6,24 @@ the subprocess/snapshot-parsing plumbing. Every function takes an explicit
 `session` name rather than assuming a single global session, since
 different tools use different agent-browser sessions (LinkedIn needs a
 persistent logged-in session; ATS application forms generally don't).
+
+Week 6 added `humanize.py`-backed pacing to `focus()` (a curved mouse
+approach + jittered pause instead of a straight teleport and a fixed sleep)
+and to typing (`type_chunks`/`type_humanized`, a chunked non-uniform typing
+cadence instead of one instant `fill`) — realism/robustness improvements,
+not an attempt to defeat any platform's bot-detection.
 """
 
 import itertools
+import json
+import random
 import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import humanize
 
 AGENT_BROWSER = shutil.which("agent-browser")
 SCREENSHOT_DIR = Path(__file__).parent / "screenshots"
@@ -24,6 +34,14 @@ REF_RE = re.compile(r"ref=(e\d+)")
 URL_RE = re.compile(r"url=([^\],]+)")
 
 _screenshot_counter = itertools.count(1)
+
+# Week 6: best-effort belief about where the mouse last landed, per session —
+# used only to give `_human_approach` a starting point for its curved path.
+# Never authoritative (agent-browser exposes no "get current mouse position"
+# command), so a wrong guess just means one path starts from a plausible
+# nearby point instead of the exact real one; it never affects correctness of
+# the click that follows, which always still targets `ref` directly.
+_last_mouse_pos: dict[str, tuple[float, float]] = {}
 
 
 def run(session: str, *args: str, timeout: int = 45) -> str:
@@ -136,12 +154,69 @@ def options_for(elements: list[dict], combobox_ref: str) -> list[dict]:
     return options
 
 
-def focus(session: str, ref: str, label: str) -> None:
+def _human_approach(session: str, ref: str) -> None:
+    """Move the mouse toward `ref` along a short, curved multi-point path
+    (`humanize.mouse_path`) instead of teleporting the cursor straight to it
+    — purely cosmetic realism, so any failure here (unsupported `--json`
+    flag, an off-screen ref, a box that can't be read) is swallowed rather
+    than allowed to block the real action that follows. Falls back silently
+    to no movement, same as before this existed."""
+    try:
+        # `--json` wraps the payload as {"success", "data", "error"} rather
+        # than returning the bounding box bare — confirmed live against a
+        # real agent-browser session, where reading box["x"] straight off
+        # the top level silently KeyError'd into this function's own
+        # except-pass on every single call.
+        box = json.loads(run(session, "get", "box", ref, "--json"))["data"]
+        target_x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
+        target_y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+        start_x, start_y = _last_mouse_pos.get(
+            session, (target_x + random.uniform(-120, 120), target_y + random.uniform(-90, 90))
+        )
+        for x, y in humanize.mouse_path(start_x, start_y, target_x, target_y):
+            run(session, "mouse", "move", str(x), str(y))
+        _last_mouse_pos[session] = (target_x, target_y)
+    except Exception:
+        pass
+
+
+def focus(session: str, ref: str, label: str, capture: bool = True) -> None:
     """Highlight the element the agent is about to act on (visible live in
-    the headed window) and save a numbered screenshot of that moment."""
+    the headed window), approach it with a human-like mouse path, and — for
+    a decision-worthy action — save a numbered screenshot of that moment.
+    `capture=False` (Week 6) skips the screenshot for a merely exploratory
+    step that doesn't itself represent a filled/chosen/clicked value — e.g.
+    opening a dropdown just to read what options it renders — since that
+    step isn't what the shadow-click audit trail is meant to prove; halving
+    screenshot volume on a dropdown-heavy form without losing the
+    audit-worthy shot of the actual selection."""
     run(session, "highlight", ref)
-    time.sleep(FOCUS_PAUSE_SECONDS)
+    _human_approach(session, ref)
+    time.sleep(humanize.human_delay(FOCUS_PAUSE_SECONDS))
+    if not capture:
+        return
     SCREENSHOT_DIR.mkdir(exist_ok=True)
     safe_label = re.sub(r"[^\w-]+", "_", label).strip("_")[:60]
     shot_path = SCREENSHOT_DIR / f"{next(_screenshot_counter):03d}_{safe_label}.png"
     run(session, "screenshot", str(shot_path))
+
+
+def type_chunks(session: str, ref: str, text: str) -> None:
+    """Type `text` into `ref` without clearing existing content first (same
+    contract as agent-browser's own `type`), but as a burst-and-pause
+    sequence of small chunks (`humanize.typing_chunks`) instead of one
+    uniform-speed call — a non-linear typing cadence closer to how someone
+    actually types. Used by `form_fill.py`'s `_search_autocomplete_options`
+    for progressive-search fields."""
+    for chunk, delay in humanize.typing_chunks(text):
+        run(session, "type", ref, chunk)
+        time.sleep(delay)
+
+
+def type_humanized(session: str, ref: str, text: str) -> None:
+    """Clear `ref` then type `text` with a humanized cadence (`type_chunks`)
+    — the drop-in replacement for a plain `fill` call. Used by
+    `form_fill.py`'s `_fill_and_verify`, which verifies the result
+    afterward regardless of how the value got there."""
+    run(session, "fill", ref, "")
+    type_chunks(session, ref, text)

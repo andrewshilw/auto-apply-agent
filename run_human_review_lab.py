@@ -33,7 +33,9 @@ DEFAULT_FIXTURE = Path(__file__).parent / "sample_data" / "mock_human_review_app
 
 def run(job_url: str) -> None:
     print(f"Filling application form at: {job_url}\n")
-    print(run_form_fill(job_url))
+    # Week 6: close_when_done=False — leave the window open afterward for
+    # inspection, same as run_form_fill_lab.py.
+    print(run_form_fill(job_url, close_when_done=False))
 
 
 if __name__ == "__main__":
