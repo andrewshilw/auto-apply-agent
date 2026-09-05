@@ -481,6 +481,172 @@ def _select_custom_option(session: str, combobox_name: str, option_ref: str, opt
     return ok
 
 
+# Used only to disambiguate a location autocomplete's suggestions (e.g.
+# telling "Austin, Texas" apart from "Austin, Minnesota") — see
+# `_best_matching_option`. US-only, matching this lab's sample profile;
+# a value with no recognizable state hint just skips that disambiguation.
+US_STATE_ABBREVIATIONS = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
+    "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
+    "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    "DC": "District of Columbia",
+}  # fmt: skip
+
+
+def _autocomplete_query(value: str) -> str:
+    """The text actually typed into a location-style autocomplete: just the
+    part before the first comma. Confirmed live against Greenhouse's own
+    "Location (City)" field — typing the full profile value verbatim (e.g.
+    "Austin, TX") returns *zero* suggestions from its geocoding widget, even
+    though "Austin" alone matches immediately. `_best_matching_option`
+    recovers the state-level precision this loses by re-checking the full
+    value against whatever this narrower query actually returns."""
+    return value.split(",")[0].strip()
+
+
+def _best_matching_option(options: list[dict], value: str) -> dict:
+    """Among a location autocomplete's suggestions for the narrowed query
+    (see `_autocomplete_query`), pick the one that actually matches the
+    profile's full value — confirmed live, a common city name like "Austin"
+    gets suggested for Texas, Ohio, Minnesota, Indiana, Arkansas *and*
+    Pennsylvania all at once, so picking the top suggestion blindly is a
+    coin flip. Falls back to the top suggestion (the widget's own best
+    guess) when the value carries no recognizable state hint, or when
+    nothing among the suggestions mentions it."""
+    hint = value.split(",")[1].strip() if "," in value else ""
+    if hint:
+        hint_full = US_STATE_ABBREVIATIONS.get(hint.upper(), hint)
+        match = next(
+            (o for o in options if hint.lower() in o["name"].lower() or hint_full.lower() in o["name"].lower()),
+            None,
+        )
+        if match:
+            return match
+    return options[0]
+
+
+def _has_cleared_selection_control(elements: list[dict], combobox_ref: str) -> bool:
+    """Whether a "Clear selection"-type button has appeared right after this
+    combobox — confirmed live, this is the *only* reliable tell that a
+    react-select-style widget (Greenhouse's Location field) actually
+    committed a picked suggestion. Reading the combobox's own text/value
+    back (the way `_fill_and_verify` and `_select_custom_option` do for
+    every other field) doesn't work here: the underlying `<input>` this
+    widget's accessible name and value both come from goes back to *blank*
+    the instant a suggestion is picked — the chosen label renders in a
+    sibling node the accessibility tree never folds into the combobox
+    itself — so a real, successful pick and a closed-with-nothing-picked
+    "Escape" look identical to every other check available. A clearable
+    widget only grows this control once it actually holds a value. Same
+    document-order adjacency assumption as `browser.options_for`."""
+    start = next((i for i, el in enumerate(elements) if el["ref"] == combobox_ref), None)
+    if start is None:
+        return False
+    for el in elements[start + 1 : start + 6]:
+        if el["role"] == "button" and "clear" in el["name"].lower():
+            return True
+        if el["role"] in ("textbox", "combobox"):
+            break
+    return False
+
+
+def _search_autocomplete_options(session: str, el: dict, query: str) -> list[dict]:
+    """Type `query` into an already-open type-to-search combobox (real
+    keystrokes via `type`, not `fill` — the suggestion list is fetched off a
+    debounced input/keyup listener a synthetic value-set doesn't reliably
+    trigger) and poll briefly for its suggestion list to populate — a live
+    network round-trip, not instant. Returns whatever's there once options
+    show up, or an empty list if the poll window runs out or the page
+    changed underneath (the combobox's own ref went stale)."""
+    browser.run(session, "type", el["ref"], query)
+    for _ in range(4):
+        time.sleep(0.6)
+        elements = browser.snapshot(session)
+        combobox = next((e for e in elements if e["role"] == "combobox" and e["name"] == el["name"]), None)
+        if combobox is None:
+            return []
+        options = browser.options_for(elements, combobox["ref"])
+        if options:
+            return options
+    return []
+
+
+def _fill_autocomplete_field(
+    session: str, el: dict, profile: dict, field_mapping: dict[str, str | None]
+) -> tuple[dict | None, dict | None]:
+    """A combobox that opened with no options at all (`browser.options_for`'s
+    "type-to-search" case) — e.g. Greenhouse's "Location" field, a
+    react-select-backed geocoding autocomplete. Typing into it and blurring
+    (`_fill_text_field`'s plain path) isn't enough here: confirmed live, the
+    field keeps the typed text right up until focus moves away, then
+    silently clears itself, because its real value is bound to a selected
+    suggestion object, not the raw text — only clicking a suggestion
+    actually sets it. So this searches a narrowed query (`_autocomplete_
+    query` — typing the full profile value verbatim reliably returns zero
+    suggestions from Greenhouse's own geocoding proxy) via
+    `_search_autocomplete_options`, retrying that search once from a clean
+    slate (`Escape` clears the field back to empty here, confirmed live) if
+    it comes back empty — that proxy has been observed to intermittently
+    time out server-side, and a fresh retry reliably recovers — then clicks
+    whichever suggestion actually matches the full profile value
+    (`_best_matching_option`) the same way `_select_custom_option` clicks
+    any other custom-widget option, retrying once against a freshly
+    re-located ref if the click itself lands on a now-stale one (same
+    re-render race `_select_custom_option` guards against for the country
+    picker). Falls back to the plain typed-and-verified path if no
+    suggestions ever appear after the retry, or the pick still can't be
+    confirmed — i.e. this combobox turns out to really just be a free-text
+    field after all, or the underlying service is genuinely unavailable."""
+    key = field_mapping.get(el["name"])
+    value = profile.get(key, "") if key else ""
+    if not (key and value):
+        reason = "no semantic match" if not key else "no profile value for this field"
+        return None, {"label": el["name"], "role": el["role"], "ref": el["ref"], "reason": reason}
+
+    query = _autocomplete_query(value)
+    options = _search_autocomplete_options(session, el, query)
+    if not options:
+        browser.run(session, "press", "Escape")
+        elements = browser.snapshot(session)
+        retry_el = next((e for e in elements if e["role"] == "combobox" and e["name"] == el["name"]), None)
+        if retry_el is not None:
+            browser.run(session, "click", retry_el["ref"])
+            time.sleep(0.3)
+            options = _search_autocomplete_options(session, retry_el, query)
+
+    if options:
+        chosen = _best_matching_option(options, value)
+        clicked = _click_option(session, chosen["ref"], chosen["name"])
+        if not clicked:
+            elements = browser.snapshot(session)
+            combobox = next((e for e in elements if e["role"] == "combobox" and e["name"] == el["name"]), None)
+            fresh_options = browser.options_for(elements, combobox["ref"]) if combobox else []
+            retry_option = next((o for o in fresh_options if o["name"] == chosen["name"]), None)
+            clicked = retry_option is not None and _click_option(session, retry_option["ref"], retry_option["name"])
+        if clicked:
+            time.sleep(0.3)
+            elements = browser.snapshot(session)
+            combobox = next((e for e in elements if e["role"] == "combobox" and e["name"] == el["name"]), None)
+            if combobox is not None and _has_cleared_selection_control(elements, combobox["ref"]):
+                return {"label": el["name"], "key": key, "value": chosen["name"]}, None
+
+    # No suggestions ever appeared (or the pick couldn't be confirmed) —
+    # either this is really just a free-text field, or the geocoding
+    # service is genuinely unavailable right now. Close any lingering
+    # suggestion popup before falling back to the plain typed-and-verified
+    # path, which will itself correctly report "needs manual review" if the
+    # field turns out to require a real selection after all.
+    browser.run(session, "press", "Escape")
+    return _fill_text_field(session, profile, el, field_mapping)
+
+
 def fill_dropdowns_node(state: FormFillState) -> FormFillState:
     """AI takeover for combobox/dropdown fields — see the module docstring
     for why knowing the right profile key isn't enough here the way it is
@@ -523,10 +689,12 @@ def fill_dropdowns_node(state: FormFillState) -> FormFillState:
                 continue  # opening it changed the page underneath us; nothing safe to act on
             options = browser.options_for(elements, el["ref"])
             if not options:
-                # Genuinely not a dropdown — e.g. a free-text "Location" autocomplete
-                # that merely has combobox role. Close it and fill it like a textbox.
-                browser.run(session, "press", "Escape")
-                f, s = _fill_text_field(session, profile, el, field_mapping)
+                # No options pre-populated — either a plain free-text field,
+                # or a type-to-search autocomplete (e.g. Greenhouse's
+                # "Location") whose suggestions only appear once you type
+                # into it. `_fill_autocomplete_field` tries the latter first
+                # and falls back to plain typing if no suggestions show up.
+                f, s = _fill_autocomplete_field(session, el, profile, field_mapping)
                 (filled if f else skipped).append(f or s)
                 continue
 

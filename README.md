@@ -90,9 +90,24 @@ module docstring in `agent.py` for the full graph shape.
   verified, not just fired-and-forgotten: `_fill_and_verify` reads a
   textbox's value back *after forcing a blur*, because testing against a
   real Greenhouse posting turned up autocomplete-style fields (e.g. a
-  Google-Places-style "Location" box) that accept a typed value right up
-  until focus moves away, then silently clear themselves since no dropdown
-  suggestion was ever selected; dropdown picks get their own
+  react-select-backed "Location" box) that accept a typed value right up
+  until focus moves away, then silently clear themselves since no
+  suggestion was ever selected. Those get real handling, not just
+  detection: `_fill_autocomplete_field` searches a narrowed query rather
+  than the raw profile value (typing the full "Austin, TX" verbatim
+  reliably returns zero suggestions from Greenhouse's own geocoding proxy,
+  even though "Austin" alone matches immediately), picks whichever
+  suggestion actually matches the full value (`_best_matching_option` —
+  "Austin" alone is ambiguous across Texas, Ohio, Minnesota, ...), and
+  confirms the pick stuck via a "Clear selection" control that only
+  appears once a value is truly committed (`_has_cleared_selection_control`
+  — the field's own accessible text/value stay blank even on a successful
+  pick, so nothing else available can tell success apart from a closed
+  dropdown that picked nothing). Confirmed live that proxy also
+  intermittently times out server-side, so the search retries once from a
+  clean slate before falling back to the plain typed-and-verified path,
+  which then correctly reports "needs manual review" if the field turns
+  out to require a real selection after all. Dropdown picks get their own
   widget-specific verification (`_select_native_option` /
   `_select_custom_option`) since a real `<select>` and a custom
   react-select-style widget expose their current value completely
